@@ -1,0 +1,42 @@
+#include <winres.h>
+#include "resource.h"
+#include "../MyCommander/Version.h"
+
+// FEA-0006 §4: the installer's payload, embedded rather than shipped as a
+// side-by-side folder. Tools/RebuildReleaseForInstaller.ps1 (this project's
+// own PreBuildEvent) rebuilds MyCommander.exe as Release and copies it,
+// plus USERGUIDE.md/LICENSE, into payload\ before rc.exe ever sees these
+// lines — see Source/MyCommanderSetup/payload/README.txt for why that
+// folder itself isn't checked into git.
+IDR_PAYLOAD_MYCOMMANDER RCDATA "payload\\MyCommander.exe"
+IDR_PAYLOAD_USERGUIDE   RCDATA "payload\\USERGUIDE.md"
+IDR_PAYLOAD_LICENSE     RCDATA "payload\\LICENSE"
+
+VS_VERSION_INFO VERSIONINFO
+ FILEVERSION MC_VERSION_MAJOR,MC_VERSION_MINOR,MC_VERSION_PATCH,MC_VERSION_BUILD
+ PRODUCTVERSION MC_VERSION_MAJOR,MC_VERSION_MINOR,MC_VERSION_PATCH,MC_VERSION_BUILD
+ FILEFLAGSMASK VS_FFI_FILEFLAGSMASK
+ FILEFLAGS 0x0L
+ FILEOS VOS_NT_WINDOWS32
+ FILETYPE VFT_APP
+ FILESUBTYPE VFT2_UNKNOWN
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904B0"
+        BEGIN
+            VALUE "CompanyName", "Attila Gallai"
+            VALUE "FileDescription", "MyCommander Setup"
+            VALUE "FileVersion", MC_VERSION_STR
+            VALUE "InternalName", "MyCommanderSetup"
+            VALUE "LegalCopyright", "Copyright (C) Attila Gallai 1985 - 2026"
+            VALUE "OriginalFilename", "MyCommanderSetup.exe"
+            VALUE "ProductName", "MyCommander"
+            VALUE "ProductVersion", MC_VERSION_STR
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END

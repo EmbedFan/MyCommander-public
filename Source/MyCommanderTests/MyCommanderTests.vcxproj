@@ -1,0 +1,160 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Debug|x64">
+      <Configuration>Debug</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Release|x64">
+      <Configuration>Release</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+  </ItemGroup>
+  <PropertyGroup Label="Globals">
+    <VCProjectVersion>17.0</VCProjectVersion>
+    <ProjectGuid>{9864E3BA-E3CE-4B4B-9916-F0EE836FC76D}</ProjectGuid>
+    <RootNamespace>MyCommanderTests</RootNamespace>
+    <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
+    <Keyword>Win32Proj</Keyword>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'" Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType>
+    <UseDebugLibraries>true</UseDebugLibraries>
+    <PlatformToolset>v143</PlatformToolset>
+    <CharacterSet>Unicode</CharacterSet>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'" Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType>
+    <UseDebugLibraries>false</UseDebugLibraries>
+    <PlatformToolset>v143</PlatformToolset>
+    <WholeProgramOptimization>true</WholeProgramOptimization>
+    <CharacterSet>Unicode</CharacterSet>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <ImportGroup Label="ExtensionSettings">
+  </ImportGroup>
+  <ImportGroup Label="Shared">
+  </ImportGroup>
+  <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
+  </ImportGroup>
+  <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
+  </ImportGroup>
+  <PropertyGroup Label="UserMacros" />
+  <PropertyGroup>
+    <OutDir Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">$(SolutionDir)Build\$(Platform)\$(Configuration)\</OutDir>
+    <IntDir Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">$(SolutionDir)Build\Intermediate\$(Platform)\$(Configuration)\MyCommanderTests\</IntDir>
+    <OutDir Condition="'$(Configuration)|$(Platform)'=='Release|x64'">$(SolutionDir)Build\$(Platform)\$(Configuration)\</OutDir>
+    <IntDir Condition="'$(Configuration)|$(Platform)'=='Release|x64'">$(SolutionDir)Build\Intermediate\$(Platform)\$(Configuration)\MyCommanderTests\</IntDir>
+  </PropertyGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+    <ClCompile>
+      <WarningLevel>Level4</WarningLevel>
+      <SDLCheck>true</SDLCheck>
+      <PreprocessorDefinitions>_DEBUG;_CONSOLE;UNICODE;_UNICODE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <ConformanceMode>true</ConformanceMode>
+      <LanguageStandard>stdcpp20</LanguageStandard>
+      <AdditionalIncludeDirectories>..\MyCommander;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <RuntimeLibrary>MultiThreadedDebug</RuntimeLibrary>
+    </ClCompile>
+    <Link>
+      <SubSystem>Console</SubSystem>
+      <GenerateDebugInformation>true</GenerateDebugInformation>
+    </Link>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <ClCompile>
+      <WarningLevel>Level4</WarningLevel>
+      <FunctionLevelLinking>true</FunctionLevelLinking>
+      <IntrinsicFunctions>true</IntrinsicFunctions>
+      <SDLCheck>true</SDLCheck>
+      <PreprocessorDefinitions>NDEBUG;_CONSOLE;UNICODE;_UNICODE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <ConformanceMode>true</ConformanceMode>
+      <LanguageStandard>stdcpp20</LanguageStandard>
+      <AdditionalIncludeDirectories>..\MyCommander;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
+    </ClCompile>
+    <Link>
+      <SubSystem>Console</SubSystem>
+      <EnableCOMDATFolding>true</EnableCOMDATFolding>
+      <OptimizeReferences>true</OptimizeReferences>
+      <GenerateDebugInformation>true</GenerateDebugInformation>
+    </Link>
+  </ItemDefinitionGroup>
+  <ItemGroup>
+    <ClCompile Include="TestMain.cpp" />
+    <ClCompile Include="TestFramework.cpp" />
+    <ClCompile Include="CommandHistoryTests.cpp" />
+    <ClCompile Include="ColorContrastTests.cpp" />
+    <ClCompile Include="ConfigTests.cpp" />
+    <ClCompile Include="DialogInputTests.cpp" />
+    <ClCompile Include="NavigationTests.cpp" />
+    <ClCompile Include="ElevationTests.cpp" />
+    <ClCompile Include="HintBarTests.cpp" />
+    <ClCompile Include="FileOpsTests.cpp" />
+    <ClCompile Include="LogTests.cpp" />
+    <ClCompile Include="PanelTests.cpp" />
+    <ClCompile Include="PathUtilTests.cpp" />
+    <ClCompile Include="ProcessTests.cpp" />
+    <ClCompile Include="SearchTests.cpp" />
+    <ClCompile Include="SessionTests.cpp" />
+    <ClCompile Include="SetupLogicTests.cpp" />
+    <ClCompile Include="TextFileTests.cpp" />
+    <ClCompile Include="TextWidthTests.cpp" />
+    <ClCompile Include="..\MyCommanderSetup\SetupLogic.cpp">
+      <ObjectFileName>$(IntDir)MyCommanderSetup_SetupLogic.obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="..\MyCommander\CommandHistory.cpp">
+      <ObjectFileName>$(IntDir)MyCommander_CommandHistory.obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="..\MyCommander\DialogInput.cpp">
+      <ObjectFileName>$(IntDir)MyCommander_DialogInput.obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="..\MyCommander\Navigation.cpp">
+      <ObjectFileName>$(IntDir)MyCommander_Navigation.obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="..\MyCommander\Config.cpp">
+      <ObjectFileName>$(IntDir)MyCommander_Config.obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="..\MyCommander\Log.cpp">
+      <ObjectFileName>$(IntDir)MyCommander_Log.obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="..\MyCommander\Elevation.cpp">
+      <ObjectFileName>$(IntDir)MyCommander_Elevation.obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="..\MyCommander\FileOps.cpp">
+      <ObjectFileName>$(IntDir)MyCommander_FileOps.obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="..\MyCommander\Process.cpp">
+      <ObjectFileName>$(IntDir)MyCommander_Process.obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="..\MyCommander\Panel.cpp">
+      <ObjectFileName>$(IntDir)MyCommander_Panel.obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="..\MyCommander\Search.cpp">
+      <ObjectFileName>$(IntDir)MyCommander_Search.obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="..\MyCommander\Session.cpp">
+      <ObjectFileName>$(IntDir)MyCommander_Session.obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="..\MyCommander\TextFile.cpp">
+      <ObjectFileName>$(IntDir)MyCommander_TextFile.obj</ObjectFileName>
+    </ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="TestFramework.h" />
+    <ClInclude Include="..\MyCommander\HintBar.h" />
+    <ClInclude Include="..\MyCommander\Dialog.h" />
+    <ClInclude Include="..\MyCommander\Navigation.h" />
+    <ClInclude Include="..\MyCommanderSetup\SetupLogic.h" />
+    <ClInclude Include="TestFixtures.h" />
+  </ItemGroup>
+  <ItemGroup>
+    <ResourceCompile Include="MyCommanderTests.rc" />
+  </ItemGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+  <ImportGroup Label="ExtensionTargets">
+  </ImportGroup>
+</Project>

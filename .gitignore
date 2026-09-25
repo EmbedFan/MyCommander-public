@@ -1,0 +1,47 @@
+# Prerequisites
+*.d
+
+# Compiled Object files
+*.slo
+*.lo
+*.o
+*.obj
+
+# Precompiled Headers
+*.gch
+*.pch
+
+# Compiled Dynamic libraries
+*.so
+*.dylib
+*.dll
+
+# Fortran module files
+*.mod
+*.smod
+
+# Compiled Static libraries
+*.lai
+*.la
+*.a
+*.lib
+
+# Executables
+*.exe
+*.out
+*.app
+
+# Build output (MyCommander.vcxproj/.sln write everything here; nothing
+# under this directory is source and none of it should be tracked)
+Build/
+
+# Visual Studio per-user/IDE state
+.vs/
+*.user
+
+# MyCommanderSetup's embedded-resource staging folder (FEA-0006 Sec 4):
+# repopulated every build by Tools/RebuildReleaseForInstaller.ps1, never
+# source - keep the folder itself (via payload/README.txt) but not its
+# generated contents.
+Source/MyCommanderSetup/payload/*
+!Source/MyCommanderSetup/payload/README.txt
