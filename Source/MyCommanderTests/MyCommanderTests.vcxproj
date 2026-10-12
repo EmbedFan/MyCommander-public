@@ -93,8 +93,24 @@
     <ClCompile Include="NavigationTests.cpp" />
     <ClCompile Include="ElevationTests.cpp" />
     <ClCompile Include="HintBarTests.cpp" />
+    <ClCompile Include="HexDumpTests.cpp" />
+    <ClCompile Include="DirectoryTreeTests.cpp" />
+    <ClCompile Include="OperationQueueTests.cpp" />
+    <ClCompile Include="JobWorkerTests.cpp" />
+    <ClCompile Include="MenuBarTests.cpp" />
+    <ClCompile Include="PluginManagerTests.cpp" />
+    <ClCompile Include="FavoritesTests.cpp" />
+    <ClCompile Include="MultiRenameTests.cpp" />
+    <ClCompile Include="ContentSearchTests.cpp" />
+    <ClCompile Include="DirCompareTests.cpp" />
+    <ClCompile Include="DirSyncTests.cpp" />
+    <ClCompile Include="TextDiffTests.cpp" />
+    <ClCompile Include="KeyMapTests.cpp" />
+    <ClCompile Include="FileActionsTests.cpp" />
+    <ClCompile Include="FileInfoTests.cpp" />
     <ClCompile Include="FileOpsTests.cpp" />
     <ClCompile Include="LogTests.cpp" />
+    <ClCompile Include="MarkdownRendererTests.cpp" />
     <ClCompile Include="PanelTests.cpp" />
     <ClCompile Include="PathUtilTests.cpp" />
     <ClCompile Include="ProcessTests.cpp" />
@@ -115,14 +131,47 @@
     <ClCompile Include="..\MyCommander\Navigation.cpp">
       <ObjectFileName>$(IntDir)MyCommander_Navigation.obj</ObjectFileName>
     </ClCompile>
+    <ClCompile Include="..\MyCommander\PluginManagerLogic.cpp">
+      <ObjectFileName>$(IntDir)MyCommander_PluginManagerLogic.obj</ObjectFileName>
+    </ClCompile>
     <ClCompile Include="..\MyCommander\Config.cpp">
       <ObjectFileName>$(IntDir)MyCommander_Config.obj</ObjectFileName>
     </ClCompile>
     <ClCompile Include="..\MyCommander\Log.cpp">
       <ObjectFileName>$(IntDir)MyCommander_Log.obj</ObjectFileName>
     </ClCompile>
+    <ClCompile Include="..\MyCommander\MarkdownRenderer.cpp">
+      <ObjectFileName>$(IntDir)MyCommander_MarkdownRenderer.obj</ObjectFileName>
+    </ClCompile>
     <ClCompile Include="..\MyCommander\Elevation.cpp">
       <ObjectFileName>$(IntDir)MyCommander_Elevation.obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="..\MyCommander\Favorites.cpp">
+      <ObjectFileName>$(IntDir)MyCommander_Favorites.obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="..\MyCommander\MultiRename.cpp">
+      <ObjectFileName>$(IntDir)MyCommander_MultiRename.obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="..\MyCommander\ContentSearch.cpp">
+      <ObjectFileName>$(IntDir)MyCommander_ContentSearch.obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="..\MyCommander\DirCompare.cpp">
+      <ObjectFileName>$(IntDir)MyCommander_DirCompare.obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="..\MyCommander\DirSync.cpp">
+      <ObjectFileName>$(IntDir)MyCommander_DirSync.obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="..\MyCommander\TextDiff.cpp">
+      <ObjectFileName>$(IntDir)MyCommander_TextDiff.obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="..\MyCommander\KeyMap.cpp">
+      <ObjectFileName>$(IntDir)MyCommander_KeyMap.obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="..\MyCommander\FileActions.cpp">
+      <ObjectFileName>$(IntDir)MyCommander_FileActions.obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="..\MyCommander\FileInfo.cpp">
+      <ObjectFileName>$(IntDir)MyCommander_FileInfo.obj</ObjectFileName>
     </ClCompile>
     <ClCompile Include="..\MyCommander\FileOps.cpp">
       <ObjectFileName>$(IntDir)MyCommander_FileOps.obj</ObjectFileName>
@@ -142,12 +191,41 @@
     <ClCompile Include="..\MyCommander\TextFile.cpp">
       <ObjectFileName>$(IntDir)MyCommander_TextFile.obj</ObjectFileName>
     </ClCompile>
+    <ClCompile Include="..\MyCommander\HexDump.cpp">
+      <ObjectFileName>$(IntDir)MyCommander_HexDump.obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="..\MyCommander\DirectoryTree.cpp">
+      <ObjectFileName>$(IntDir)MyCommander_DirectoryTree.obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="..\MyCommander\OperationQueue.cpp">
+      <ObjectFileName>$(IntDir)MyCommander_OperationQueue.obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="..\MyCommander\JobWorker.cpp">
+      <ObjectFileName>$(IntDir)MyCommander_JobWorker.obj</ObjectFileName>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="TestFramework.h" />
     <ClInclude Include="..\MyCommander\HintBar.h" />
+    <ClInclude Include="..\MyCommander\MenuBar.h" />
+    <ClInclude Include="..\MyCommander\Favorites.h" />
+    <ClInclude Include="..\MyCommander\MultiRename.h" />
+    <ClInclude Include="..\MyCommander\ContentSearch.h" />
+    <ClInclude Include="..\MyCommander\DirCompare.h" />
+    <ClInclude Include="..\MyCommander\DirSync.h" />
+    <ClInclude Include="..\MyCommander\TextDiff.h" />
+    <ClInclude Include="..\MyCommander\KeyMap.h" />
+    <ClInclude Include="..\MyCommander\TextCase.h" />
+    <ClInclude Include="..\MyCommander\FileActions.h" />
+    <ClInclude Include="..\MyCommander\Utf8TextFile.h" />
+    <ClInclude Include="..\MyCommander\FileInfo.h" />
     <ClInclude Include="..\MyCommander\Dialog.h" />
+    <ClInclude Include="..\MyCommander\MarkdownRenderer.h" />
     <ClInclude Include="..\MyCommander\Navigation.h" />
+    <ClInclude Include="..\MyCommander\PluginManager.h" />
+    <ClInclude Include="..\MyCommanderPluginSdk\McPluginAbi.h" />
+    <ClInclude Include="..\MyCommanderPluginSdk\McPluginHost.h" />
+    <ClInclude Include="..\MyCommanderPluginSdk\McPluginTypes.h" />
     <ClInclude Include="..\MyCommanderSetup\SetupLogic.h" />
     <ClInclude Include="TestFixtures.h" />
   </ItemGroup>

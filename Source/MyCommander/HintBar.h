@@ -5,6 +5,7 @@
 #endif
 #include <windows.h>
 
+#include "KeyMap.h"
 #include "TextWidth.h"
 
 #include <algorithm>
@@ -49,7 +50,7 @@ struct HintSegment {
     std::optional<HintAction> action;
 };
 
-inline std::vector<HintSegment> BuildHintSegments(HintContext context) {
+inline std::vector<HintSegment> BuildDefaultHintSegments(HintContext context) {
     auto seg = [](const wchar_t* label, WORD vk, bool ctrl = false, bool shift = false, bool alt = false) {
         return HintSegment{label, HintAction{vk, ctrl, shift, alt}};
     };
@@ -125,8 +126,10 @@ inline std::vector<HintSegment> BuildHintSegments(HintContext context) {
                 seg(L"Ctrl+H Hidden", L'H', /*ctrl=*/true),
                 seg(L"F2 Rename", VK_F2),
                 seg(L"F3 View", VK_F3),
+                seg(L"Shift+F3 Actions", VK_F3, /*ctrl=*/false, /*shift=*/true),
                 seg(L"F4 Edit", VK_F4),
                 seg(L"F5 Copy", VK_F5),
+                seg(L"Shift+F5 Copy as", VK_F5, /*ctrl=*/false, /*shift=*/true),
                 seg(L"F6 Move", VK_F6),
                 seg(L"F8 Delete", VK_F8),
                 seg(L"Ctrl+A Attrib", L'A', /*ctrl=*/true),
@@ -149,6 +152,45 @@ inline std::vector<HintSegment> BuildHintSegments(HintContext context) {
             };
     }
     return {seg(L"F1 Help", VK_F1), seg(L"F10 Quit", VK_F10)};
+}
+
+// KEY-005: a segment whose command the user rebound shows the command's
+// current (first) key instead of its default -- "F5 Copy" becomes
+// "Ctrl+C Copy" -- and an unbound command's segment is dropped. The
+// action stays the default key: a click injects it, and injected keys
+// bypass the remapping (KeyMap.h's NoteInjectedKey). Informational
+// segments ("Alt+F1/2 Drive") are left as they are.
+inline std::vector<HintSegment> RelabelHintSegments(std::vector<HintSegment> segments, const KeyMap& keyMap) {
+    std::vector<HintSegment> out;
+    for (HintSegment& segment : segments) {
+        if (segment.action) {
+            KeyChord chord{segment.action->virtualKeyCode, segment.action->ctrlHeld, segment.action->shiftHeld,
+                           segment.action->altHeld};
+            if (auto command = CommandForDefaultChord(chord); command && keyMap.IsCustomized(*command)) {
+                const auto& keys = keyMap.KeysFor(*command);
+                if (keys.empty()) continue;
+                size_t space = segment.label.find(L' ');
+                segment.label = FormatKeyChord(keys.front()) +
+                                (space == std::wstring::npos ? std::wstring() : segment.label.substr(space));
+            }
+        }
+        out.push_back(std::move(segment));
+    }
+    return out;
+}
+
+// KEY-005: main.cpp points this at its live key map so every caller of
+// BuildHintSegments (drawing and click hit-testing alike) agrees; null (the
+// default, and in tests) means the default keys.
+inline const KeyMap*& ActiveHintKeyMap() {
+    static const KeyMap* keyMap = nullptr;
+    return keyMap;
+}
+
+inline std::vector<HintSegment> BuildHintSegments(HintContext context) {
+    std::vector<HintSegment> segments = BuildDefaultHintSegments(context);
+    if (const KeyMap* keyMap = ActiveHintKeyMap()) segments = RelabelHintSegments(std::move(segments), *keyMap);
+    return segments;
 }
 
 // Re-expressed in terms of BuildHintSegments (rather than its own
@@ -198,7 +240,6 @@ inline std::vector<PlacedHintSegment> LayOutHintBar(HintContext context, SHORT w
             if (row + 1 >= maxRows) break;  // capped — remaining segments are simply not placed
             ++row;
             col = 1;
-            firstOnRow = true;
             advance = 0;
         }
         col = static_cast<SHORT>(col + advance);

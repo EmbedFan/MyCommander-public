@@ -286,6 +286,22 @@ int RunInstall() {
         return 1;
     }
 
+    // IS-0013: the ZIP plugin -- a warning, not a hard failure, if it can't
+    // be extracted (e.g. this installer was packaged without it). The app
+    // is fully usable with zero plugins installed, so a plugin payload
+    // problem must never block installing the core app.
+    if (!ExtractResourceToFile(IDR_PAYLOAD_ZIPPLUGIN, fs::path(installPath) / L"Plugins" / L"ZipPlugin.dll")) {
+        SayError(L"Warning: could not install the ZIP plugin -- MyCommander will still work without it.\n");
+    }
+    // EXT-005 / FTP-012: the FTP plugin, with the same warning-only policy.
+    if (!ExtractResourceToFile(IDR_PAYLOAD_FTPPLUGIN, fs::path(installPath) / L"Plugins" / L"FtpPlugin.dll")) {
+        SayError(L"Warning: could not install the FTP plugin -- MyCommander will still work without it.\n");
+    }
+    // EXT-004 / SFTP-010: the SFTP plugin, with the same warning-only policy.
+    if (!ExtractResourceToFile(IDR_PAYLOAD_SFTPPLUGIN, fs::path(installPath) / L"Plugins" / L"SftpPlugin.dll")) {
+        SayError(L"Warning: could not install the SFTP plugin -- MyCommander will still work without it.\n");
+    }
+
     // Reused as the uninstaller (see RunUninstall/BuildUninstallInfo) -
     // Apps & Features' UninstallString must point at something that still
     // exists after the original setup download is gone.

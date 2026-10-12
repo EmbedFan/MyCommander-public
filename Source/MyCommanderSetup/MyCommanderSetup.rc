@@ -11,6 +11,14 @@
 IDR_PAYLOAD_MYCOMMANDER RCDATA "payload\\MyCommander.exe"
 IDR_PAYLOAD_USERGUIDE   RCDATA "payload\\USERGUIDE.md"
 IDR_PAYLOAD_LICENSE     RCDATA "payload\\LICENSE"
+// IS-0013: the one real, user-facing plugin today -- see
+// RebuildReleaseForInstaller.ps1's own comment for why ExamplePlugin (a
+// developer-facing template, not a shipped feature) is deliberately not here.
+IDR_PAYLOAD_ZIPPLUGIN   RCDATA "payload\\ZipPlugin.dll"
+// EXT-005 / FTP-012: the FTP plugin, staged the same way.
+IDR_PAYLOAD_FTPPLUGIN   RCDATA "payload\\FtpPlugin.dll"
+// EXT-004 / SFTP-010: the SFTP plugin, staged the same way.
+IDR_PAYLOAD_SFTPPLUGIN  RCDATA "payload\\SftpPlugin.dll"
 
 VS_VERSION_INFO VERSIONINFO
  FILEVERSION MC_VERSION_MAJOR,MC_VERSION_MINOR,MC_VERSION_PATCH,MC_VERSION_BUILD

@@ -237,3 +237,92 @@ TEST_CASE(ReadIndexedLine_OutOfRangeReturnsEmptyString) {
 
     CHECK(ReadIndexedLine(in, index, 5) == L"");
 }
+
+// --- ForEachTextLine (SRC-004/005: Find files' content reader) ---------------------
+
+namespace {
+std::vector<std::wstring> ReadLines(const fs::path& path, mc::TextEncodingChoice encoding) {
+    std::vector<std::wstring> lines;
+    mc::ForEachTextLine(path, encoding, [&](size_t number, const std::wstring& line) {
+        if (number != lines.size() + 1) lines.push_back(L"<bad line number>");
+        lines.push_back(line);
+        return true;
+    });
+    return lines;
+}
+}  // namespace
+
+TEST_CASE(ForEachTextLine_Utf8WithAndWithoutBom_CrLfAndLf_SRC004) {
+    test::TempDir dir;
+    test::WriteFileContent(dir.Path() / L"plain.txt", "one\r\ntwo\nlast");
+    test::WriteFileContent(dir.Path() / L"bom.txt", "\xEF\xBB\xBF\xC3\xA1rv\xC3\xADz\nok\n");
+    CHECK((ReadLines(dir.Path() / L"plain.txt", mc::TextEncodingChoice::Auto) ==
+           std::vector<std::wstring>{L"one", L"two", L"last"}));
+    CHECK((ReadLines(dir.Path() / L"bom.txt", mc::TextEncodingChoice::Auto) ==
+           std::vector<std::wstring>{L"\x00E1rv\x00EDz", L"ok"}));
+}
+
+TEST_CASE(ForEachTextLine_Utf16LeAndBe_BomAndForced_SRC005) {
+    test::TempDir dir;
+    // "hi\r\nyo" as UTF-16LE with BOM, and as UTF-16BE with and without BOM.
+    test::WriteFileContent(dir.Path() / L"le.txt", std::string("\xFF\xFEh\0i\0\r\0\n\0y\0o\0", 14));
+    test::WriteFileContent(dir.Path() / L"be.txt", std::string("\xFE\xFF\0h\0i\0\r\0\n\0y\0o", 14));
+    test::WriteFileContent(dir.Path() / L"be-nobom.txt", std::string("\0h\0i\0\n\0y\0o", 10));
+    std::vector<std::wstring> expected{L"hi", L"yo"};
+    CHECK(ReadLines(dir.Path() / L"le.txt", mc::TextEncodingChoice::Auto) == expected);
+    CHECK(ReadLines(dir.Path() / L"le.txt", mc::TextEncodingChoice::Utf16Le) == expected);
+    CHECK(ReadLines(dir.Path() / L"be.txt", mc::TextEncodingChoice::Auto) == expected);
+    CHECK(ReadLines(dir.Path() / L"be-nobom.txt", mc::TextEncodingChoice::Utf16Be) == expected);
+}
+
+TEST_CASE(ForEachTextLine_ExplicitUtf8VersusAnsi_SRC005) {
+    test::TempDir dir;
+    test::WriteFileContent(dir.Path() / L"utf8.txt", "\xC3\xA1");  // "á" in UTF-8
+    CHECK((ReadLines(dir.Path() / L"utf8.txt", mc::TextEncodingChoice::Utf8) == std::vector<std::wstring>{L"\x00E1"}));
+    // Read as ANSI the same two bytes are two characters, whatever the code page.
+    auto ansi = ReadLines(dir.Path() / L"utf8.txt", mc::TextEncodingChoice::Ansi);
+    CHECK(ansi.size() == 1 && ansi[0].size() == 2);
+}
+
+TEST_CASE(ForEachTextLine_LinesAcrossChunkBoundary_AndEarlyStop_SRC004) {
+    test::TempDir dir;
+    std::string big;
+    for (int i = 1; i <= 20000; ++i) big += "line " + std::to_string(i) + "\n";  // > 64 KB chunk
+    test::WriteFileContent(dir.Path() / L"big.txt", big);
+    size_t count = 0;
+    bool allRight = true;
+    mc::ForEachTextLine(dir.Path() / L"big.txt", mc::TextEncodingChoice::Auto, [&](size_t n, const std::wstring& line) {
+        ++count;
+        if (line != L"line " + std::to_wstring(n)) allRight = false;
+        return true;
+    });
+    CHECK(count == 20000);
+    CHECK(allRight);
+    size_t stoppedAt = 0;
+    mc::ForEachTextLine(dir.Path() / L"big.txt", mc::TextEncodingChoice::Auto, [&](size_t n, const std::wstring&) {
+        stoppedAt = n;
+        return n < 3;
+    });
+    CHECK(stoppedAt == 3);
+}
+
+TEST_CASE(ForEachTextLine_MissingFileReturnsFalse_ProbeSeesHead_SRC004) {
+    test::TempDir dir;
+    CHECK(!mc::ForEachTextLine(dir.Path() / L"nope.txt", mc::TextEncodingChoice::Auto,
+                               [](size_t, const std::wstring&) { return true; }));
+    test::WriteFileContent(dir.Path() / L"bin.dat", std::string("MZ\x90\0\x03", 5));
+    bool probed = false;
+    size_t lines = 0;
+    mc::ForEachTextLine(
+        dir.Path() / L"bin.dat", mc::TextEncodingChoice::Auto,
+        [&](size_t, const std::wstring&) {
+            ++lines;
+            return true;
+        },
+        [&](const mc::TextFileProbe& probe) {
+            probed = probe.head.size() == 5 && !probe.utf16Bom;
+            return false;  // "binary: skip"
+        });
+    CHECK(probed);
+    CHECK(lines == 0);
+}

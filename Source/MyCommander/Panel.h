@@ -1,5 +1,10 @@
 #pragma once
 
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+
 #include <cstdint>
 #include <filesystem>
 #include <optional>
@@ -7,6 +12,35 @@
 #include <vector>
 
 namespace mc {
+
+class Console;
+
+// FEA-0002 (MC Plugin), Phase 3, §8: a small, abstract interface a `Panel`
+// gains an optional, non-owning pointer to (PluginManager owns the
+// lifetime of whatever implements this, via its own panel-content adapter
+// that forwards to a plugin's C exports -- no plugin/DLL dependency leaks
+// into Panel.h itself). When set, `main.cpp`'s DrawPanel renders this
+// panel's content area (the body below the path/volume header lines --
+// which still show the panel's own real path/title, since §8 explicitly
+// leaves panel *navigation* untouched) through Draw() instead of the
+// panel's own Entries()/cursor, and every key/click landed on this panel
+// is offered to OnKey/OnMouseClick instead of the panel's own built-in
+// navigation/selection handling.
+class IPanelContent {
+public:
+    virtual ~IPanelContent() = default;
+    virtual void Draw(Console& console, SHORT x, SHORT y, SHORT width, SHORT height, bool active) = 0;
+    // `unicodeChar` (IS-0018): the key event's typed character (0 if none),
+    // for keys whose meaning is a character rather than a physical key --
+    // e.g. '+' is Shift+3 on the Hungarian layout. Host-internal only: the
+    // plugin adapter ignores it, so the plugin ABI is unchanged.
+    virtual void OnKey(WORD virtualKeyCode, DWORD controlKeyState, wchar_t unicodeChar) = 0;
+    virtual void OnMouseClick(SHORT relativeX, SHORT relativeY, bool doubleClick) = 0;
+    virtual void OnMouseEvent(SHORT x, SHORT y, DWORD buttons, DWORD flags, DWORD) {
+        if ((buttons & FROM_LEFT_1ST_BUTTON_PRESSED) && (flags == 0 || flags == DOUBLE_CLICK))
+            OnMouseClick(x, y, flags == DOUBLE_CLICK);
+    }
+};
 
 struct Entry {
     std::wstring name;
@@ -97,6 +131,10 @@ public:
     // new directory is listed.
     void NavigateTo(const std::filesystem::path& dir, const std::wstring& selectName = L"");
 
+    // IS-0017 (preview): shows `dir`'s listing without recording history,
+    // so the user's own back/forward trail is untouched by a tree preview.
+    void PreviewLocation(const std::filesystem::path& dir);
+
     // NAV-006: each panel owns an independent, in-memory location history.
     // Back/forward navigation changes only the displayed location; it never
     // writes session state, so a crash cannot restore or repeat anything.
@@ -107,6 +145,15 @@ public:
 
     // Toggles the cursor entry's selection mark, then advances the cursor.
     void ToggleCursorSelection(int visibleRows);
+    // IS-0015: Shift+Up/Down -- `delta` is +1 (Down) or -1 (Up). Down toggles
+    // the entry being left, then moves (same as ToggleCursorSelection above);
+    // Up moves first, then toggles the entry just arrived at. This pairing
+    // makes the gesture fully reversible: moving one way then immediately
+    // back over the same entries toggles each one exactly twice (a net
+    // no-op), so shrinking a selection all the way back always clears every
+    // entry it covered -- no remembered anchor, no entry that can get stuck
+    // permanently selected regardless of how far you shrink back.
+    void ToggleSelectionAndMove(int delta, int visibleRows);
     void SelectAll();
     void ClearSelection();
     void InvertSelection();
@@ -143,6 +190,19 @@ public:
     // selected (SEL-004). Always excludes the ".." parent entry.
     std::vector<std::wstring> SelectionOrCursor() const;
 
+    // FEA-0002 Phase 3, §8: installs/removes this panel's plugin content
+    // (non-owning -- PluginManager owns the adapter's lifetime, and clears
+    // this back to nullptr, e.g. at plugin unload, via SetContent(nullptr)
+    // rather than this Panel ever reaching back into PluginManager itself).
+    // `contentTitle` replaces this panel's own path in its header line
+    // while `content` is set; empty/ignored once it's cleared again.
+    void SetContent(IPanelContent* content, std::wstring contentTitle = L"") {
+        content_ = content;
+        contentTitle_ = std::move(contentTitle);
+    }
+    IPanelContent* Content() const { return content_; }
+    const std::wstring& ContentTitle() const { return contentTitle_; }
+
 private:
     std::filesystem::path path_;
     std::vector<Entry> entries_;
@@ -171,8 +231,16 @@ private:
     // SetLocation can't just search entries_ for `selectName` itself right
     // after starting the refresh the way it used to.
     std::wstring pendingSelectName_;
+    // IS-0019: the panel's row count as last passed to MoveCursor/ClampCursor
+    // (0 = not known yet), so a refresh that restores the cursor far down a
+    // long listing can scroll it into view without main.cpp's help.
+    int lastVisibleRows_ = 0;
+
+    IPanelContent* content_ = nullptr;  // FEA-0002 Phase 3, §8: non-owning, see SetContent
+    std::wstring contentTitle_;
 
     void ClampCursor(int visibleRows);
+    void PlaceCursorOn(const std::wstring& name);
     void SortEntries();
     void BeginRefresh();
     void FinishRefresh();

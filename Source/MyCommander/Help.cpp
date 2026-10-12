@@ -1,5 +1,7 @@
 #include "Help.h"
 
+#include "KeyMap.h"
+#include "MarkdownRenderer.h"
 #include "Strings.h"
 #include "TextWidth.h"
 #include "Theme.h"
@@ -8,6 +10,7 @@
 #include <windows.h>
 
 #include <algorithm>
+#include <iterator>
 #include <vector>
 
 #pragma comment(lib, "version.lib")
@@ -111,20 +114,36 @@ const std::vector<ShortcutSection>& Sections() {
                  {L"Company", info.companyName.c_str()},
                  {L"Copyright", info.legalCopyright.c_str()},
              }},
+            {L"Menu bar",
+             {
+                 {L"Alt+F", L"Open the File menu"},
+                 {L"Alt+S", L"Open the Selection menu"},
+                 {L"Alt+C", L"Open the Commands menu"},
+                 {L"Alt+N", L"Open the Network menu"},
+                 {L"Alt+V", L"Open the View menu"},
+                 {L"Alt+E", L"Open the Settings menu"},
+                 {L"Left / Right", L"Switch to the adjacent menu, while one is open"},
+                 {L"Up / Down", L"Move within the open menu"},
+                 {L"Enter", L"Choose the highlighted item"},
+                 {L"Esc", L"Close the menu without choosing anything"},
+             }},
             {L"Navigation",
              {
                  {L"Tab", L"Switch active panel"},
                  {L"Up / Down", L"Move cursor"},
                  {L"Page Up / Page Down", L"Move a page at a time"},
-                 {L"Home / End", L"Jump to first / last entry"},
+                 {L"Home / End", L"Jump to first / last entry, or move the command-line cursor if it has text"},
                  {L"Alt+Left / Alt+Right", L"Go back / forward through the active panel's location history"},
                  {L"Enter", L"Open a directory, run the command line, or run the default file action"},
-                 {L"Backspace", L"Parent directory, or edit the command line if it has text"},
+                 {L"Backspace", L"Parent directory, or erase before the command-line cursor if it has text"},
                  {L"Alt+F1 / Alt+F2", L"Choose a drive for the left / right panel"},
+                 {L"Ctrl+D", L"Directory hotlist: go to a favorite folder (Enter), add the current one, remove (Del), rename (F2)"},
+                 {L"Ctrl+R", L"Refresh (re-read) the active panel"},
              }},
             {L"Selection",
              {
                  {L"Insert", L"Toggle selection on the cursor entry and move down"},
+                 {L"Shift+Up / Shift+Down", L"Toggle selection on each entry as the cursor moves over it"},
                  {L"Numpad + / -", L"Select / deselect entries matching a wildcard mask"},
                  {L"Ctrl+Numpad + / -", L"Select all / clear selection, unconditionally"},
                  {L"Numpad *", L"Invert selection"},
@@ -132,18 +151,23 @@ const std::vector<ShortcutSection>& Sections() {
             {L"File operations",
              {
                  {L"F2", L"Rename the cursor entry"},
+                 {L"Ctrl+M", L"Group rename the selection: masks [N] [E] [C] [YMD]..., search/replace, case, preview first"},
                  {L"F5", L"Copy the selection (or cursor entry) to the other panel"},
+                 {L"Shift+F5", L"Copy the cursor entry under a new name in the same folder (or to a full path)"},
                  {L"F6", L"Move the selection (or cursor entry) to the other panel"},
                  {L"F7", L"Create a new directory"},
                  {L"Shift+F7", L"Create a new, empty file"},
-                 {L"F8", L"Delete the selection (or cursor entry) \x2014 Recycle Bin"},
-                 {L"Shift+F8", L"Delete permanently (bypasses the Recycle Bin)"},
+                 {L"F8 / Delete", L"Delete the selection (or cursor entry) \x2014 Recycle Bin; Delete forward-deletes command-line text instead if it has any"},
+                 {L"Shift+F8 / Shift+Delete", L"Delete permanently (bypasses the Recycle Bin)"},
                  {L"Ctrl+A", L"Toggle a Windows attribute (read-only/hidden/system/archive)"},
              }},
             {L"Viewing & editing",
              {
-                 {L"F3", L"View the cursor file (built-in viewer)"},
+                 {L"F3", L"View the cursor file (its default view action; built-in viewer if none)"},
+                 {L"Shift+F3", L"Choose one of the cursor file's registered view/open actions"},
+                 {L"Shift+Enter", L"Open the cursor file (its default open action; Windows association if none)"},
                  {L"F4", L"Edit the cursor file in an external editor"},
+                 {L"Alt+Enter", L"Show file properties (size, version info, digital signature)"},
                  {L"F9", L"Open a separate interactive shell in the active directory"},
              }},
             {L"Sorting & filtering",
@@ -154,20 +178,68 @@ const std::vector<ShortcutSection>& Sections() {
                  {L"Ctrl+F6", L"Sort the active panel by modification time"},
                  {L"Ctrl+F", L"Filter the active panel by name/wildcard (empty clears it)"},
                  {L"Ctrl+H", L"Toggle hidden and system entries in the active panel"},
-                 {L"Alt+F7", L"Find files recursively (name/wildcard) under the active panel"},
+                 {L"Alt+F7", L"Find files under the active panel: name mask and optional containing text (plain or regex)"},
+                 {L"Shift+F2", L"Compare the two panels' folders and select the differences (name/size/time/content)"},
+                 {L"Ctrl+Shift+F2", L"Synchronize the two panels' folders (preview, then confirm)"},
+                 {L"Alt+F3", L"Show the differences between two text files (File > Compare contents)"},
+                 {L"Shift+Alt+F3", L"The same, always in the built-in viewer (even with diffProgram set)"},
+             }},
+            {L"Compare contents (Alt+F3)",
+             {
+                 {L"Up / Down, Page Up / Page Down, Home / End", L"Scroll both files together"},
+                 {L"Left / Right", L"Scroll sideways"},
+                 {L"F7 / Shift+F7 (n / p)", L"Next / previous difference"},
+                 {L"U", L"Side by side <-> unified (one column)"},
+                 {L"I / W", L"Ignore case on/off / whitespace: exact, trailing ignored, all ignored"},
+                 {L"F3 / Shift+F3", L"View the left / right file at this line"},
+                 {L"Esc / F10 / q", L"Close"},
              }},
             {L"Command line",
              {
+                 {L"Left / Right", L"Move the command-line cursor one character, if it has text"},
                  {L"Ctrl+Enter", L"Insert the active/selected name(s) into the command line"},
                  {L"Ctrl+Shift+Enter", L"Insert the active/selected full path(s) into the command line"},
                  {L"Ctrl+Up / Ctrl+Down", L"Browse command history into the command line"},
                  {L"Esc", L"Clear the command line if it has text"},
+             }},
+            {L"Built-in viewer (F3)",
+             {
+                 {L"Up / Down, Page Up / Page Down, Home / End", L"Scroll (text) or move the hex cursor by row/page/file start-end"},
+                 {L"/", L"Search: plain text, or #hex bytes such as #4D 5A"},
+                 {L"n", L"Repeat the last search"},
+                 {L"H", L"Switch between text and hex view"},
+                 {L"W", L"Hex view: cycle items per row 8 / 16 / 32 / fit to the window"},
+                 {L"Left / Right", L"Hex view: move the cursor one byte"},
+                 {L"Esc / F3 / F10", L"Close the viewer"},
+             }},
+            {L"Single-panel layout (Ctrl+F1)",
+             {
+                 {L"Ctrl+F1", L"Show only the active panel, full width; Ctrl+F1 again shows both"},
+                 {L"Tab", L"Single-panel layout: switch which panel is shown"},
+             }},
+            {L"Directory tree (Ctrl+T)",
+             {
+                 {L"Ctrl+T", L"Show the active panel as a directory tree; Ctrl+T again leaves it"},
+                 {L"Up / Down, Page Up / Page Down, Home / End", L"Move the tree cursor"},
+                 {L"Right", L"Expand the cursor directory (loads its subdirectories)"},
+                 {L"+ / -", L"Expand / collapse the cursor directory (numpad or main keyboard, any layout)"},
+                 {L"Left", L"Collapse the cursor directory, or move to its parent if already collapsed"},
+                 {L"Enter", L"Go to the cursor directory and leave the tree"},
+                 {L"Esc", L"Leave the tree without navigating"},
+             }},
+            {L"Background jobs (FOP-014)",
+             {
+                 {L"Alt+F5 / Alt+F6", L"Queue the selection as a background copy / move"},
+                 {L"Alt+F8 / Alt+Shift+F8", L"Queue the selection as a background delete (Recycle Bin / permanent)"},
+                 {L"Alt+Q", L"Show the background job queue; Enter on a job cancels it"},
+                 {L"F10", L"Quit; asks first when jobs are still running"},
              }},
             {L"Other",
              {
                  {L"F1", L"Show this shortcut reference"},
                  {L"F10", L"Quit"},
                  {L"Ctrl+F11", L"Open the config file in the external editor; changes apply live once you save"},
+                 {L"Menu: Edit key bindings", L"Settings menu: change these shortcuts (keys.conf); this list shows your keys"},
              }},
         };
         return result;
@@ -175,11 +247,27 @@ const std::vector<ShortcutSection>& Sections() {
     return sections;
 }
 
-// A single display row: either a section title (item == nullptr) or one
-// shortcut within the section above it.
+// A single display row: a built-in section title (item == nullptr) or a
+// built-in shortcut (sectionTitle == nullptr, item != nullptr) within the
+// section above it, or -- FEA-0002 Phase 2, §7 -- a row of plugin-supplied
+// Markdown content (isPluginRow == true; unlike the two raw-pointer fields
+// above, which point into Sections()'s process-lifetime static data,
+// `pluginText` owns its string, since plugin Markdown is fetched and parsed
+// fresh every time this screen opens), or -- IS-0009 -- a plugin "selector"
+// row (isPluginSelector == true): a full-width rule marking "a new plugin's
+// help text starts here," distinct from every Markdown heading style this
+// screen otherwise uses, so scrolling past several plugins' own content
+// doesn't leave their boundaries indistinguishable from an ordinary `#`
+// heading inside one of them.
 struct DisplayRow {
-    const wchar_t* sectionTitle = nullptr; // set only for a section-header row
-    const ShortcutItem* item = nullptr;    // set only for a shortcut row
+    const wchar_t* sectionTitle = nullptr; // set only for a built-in section-header row
+    const ShortcutItem* item = nullptr;    // set only for a built-in shortcut row
+
+    bool isPluginRow = false;
+    MarkdownLineKind pluginKind = MarkdownLineKind::Blank; // meaningful only if isPluginRow
+    std::wstring pluginText;
+
+    bool isPluginSelector = false; // IS-0009: a full-width rule preceding a plugin's own block
 };
 
 std::vector<DisplayRow> BuildRows() {
@@ -189,8 +277,56 @@ std::vector<DisplayRow> BuildRows() {
         if (!first) rows.push_back(DisplayRow{});  // blank separator row
         first = false;
         rows.push_back(DisplayRow{section.title, nullptr});
-        for (const auto& item : section.items) {
-            rows.push_back(DisplayRow{nullptr, &item});
+        std::transform(section.items.begin(), section.items.end(), std::back_inserter(rows),
+                       [](const auto& item) { return DisplayRow{nullptr, &item}; });
+    }
+    return rows;
+}
+
+// FEA-0002 Phase 2, §7: appends one more section, "Plugins", after every
+// built-in category -- one sub-heading per entry in `pluginContent` (its
+// plugin's own display name, rendered the same way a Markdown heading is),
+// followed by that plugin's Markdown source parsed via
+// MarkdownRenderer.h's deliberately minimal renderer. A no-op (returns
+// `rows` unchanged) when no plugin declared kMcPluginCapHelp -- the
+// ordinary case -- so the screen looks exactly as it did before this
+// feature existed whenever no such plugin is loaded.
+std::vector<DisplayRow> AppendPluginRows(std::vector<DisplayRow> rows, const std::vector<PluginHelpContent>& pluginContent) {
+    if (pluginContent.empty()) return rows;
+
+    rows.push_back(DisplayRow{});  // blank separator, matching the between-section spacing above
+    rows.push_back(DisplayRow{L"Plugins", nullptr});
+
+    bool firstPlugin = true;
+    for (const auto& content : pluginContent) {
+        if (!firstPlugin) rows.push_back(DisplayRow{});
+        firstPlugin = false;
+
+        // IS-0009: the selector row -- rendered via kAttrHeader (this
+        // screen's own title-row color, used nowhere else in its body
+        // content), so it can never be mistaken for a built-in section
+        // title (kAttrSection) or a Markdown heading from inside the
+        // plugin's own content (also kAttrSection, by design -- see
+        // MarkdownLineKind::Heading's rendering below).
+        DisplayRow selectorRow;
+        selectorRow.isPluginSelector = true;
+        rows.push_back(std::move(selectorRow));
+
+        DisplayRow nameRow;
+        nameRow.isPluginRow = true;
+        nameRow.pluginKind = MarkdownLineKind::Heading;
+        // IS-0011: show the plugin's own version (McPluginMetadata::version)
+        // next to its name -- omitted entirely if a plugin left it empty,
+        // rather than showing a dangling "v".
+        nameRow.pluginText = content.version.empty() ? content.name : content.name + L" v" + content.version;
+        rows.push_back(std::move(nameRow));
+
+        for (const auto& line : ParseMinimalMarkdown(content.markdown)) {
+            DisplayRow row;
+            row.isPluginRow = true;
+            row.pluginKind = line.kind;
+            row.pluginText = line.text;
+            rows.push_back(std::move(row));
         }
     }
     return rows;
@@ -200,8 +336,9 @@ constexpr size_t kKeyColumnWidth = 24;
 
 } // namespace
 
-void ShowShortcutReference(Console& console) {
-    const std::vector<DisplayRow> rows = BuildRows();
+void ShowShortcutReference(Console& console, const std::vector<PluginHelpContent>& pluginContent,
+                           const KeyMap* keyMap) {
+    const std::vector<DisplayRow> rows = AppendPluginRows(BuildRows(), pluginContent);
     int topLine = 0;
 
     auto contentHeight = [&]() { return std::max<int>(1, console.Height() - 2); };
@@ -226,16 +363,44 @@ void ShowShortcutReference(Console& console) {
                 continue;
             }
             const DisplayRow& r = rows[index];
-            if (r.sectionTitle) {
+            if (r.isPluginSelector) {
+                // IS-0009: a full-width rule, plain ASCII (no ACC-006
+                // basic-symbol-mode dependency), styled with this screen's
+                // own title-row color so it can never be confused with a
+                // section title or a Markdown heading inside a plugin's
+                // own content (both kAttrSection).
+                console.PutText(0, y, std::wstring(static_cast<size_t>(width), L'='), kAttrHeader);
+            } else if (r.sectionTitle) {
                 console.PutText(0, y, PadOrTrim(r.sectionTitle, width), kAttrSection);
             } else if (r.item) {
                 console.PutText(0, y, PadOrTrim(L"", width), kAttrNormal);  // clear the row first
-                std::wstring keyCol = L"  " + PadToDisplayWidth(r.item->key, kKeyColumnWidth);
+                // KEY-005: a rebound command shows its current keys.
+                std::wstring keyText = r.item->key;
+                if (keyMap) {
+                    if (auto relabeled = keyMap->RelabelKeyText(keyText)) keyText = *relabeled;
+                }
+                std::wstring keyCol = L"  " + PadToDisplayWidth(keyText, kKeyColumnWidth);
                 console.PutText(0, y, keyCol, kAttrKey);
                 SHORT descX = static_cast<SHORT>(StringDisplayWidth(keyCol));
                 if (descX < width) {
                     console.PutText(descX, y, PadOrTrim(r.item->description, static_cast<size_t>(width - descX)),
                                     kAttrNormal);
+                }
+            } else if (r.isPluginRow) {
+                switch (r.pluginKind) {
+                    case MarkdownLineKind::Heading:
+                        console.PutText(0, y, PadOrTrim(r.pluginText, width), kAttrSection);
+                        break;
+                    case MarkdownLineKind::Bullet:
+                        console.PutText(0, y, PadOrTrim(L"  - " + r.pluginText, width), kAttrNormal);
+                        break;
+                    case MarkdownLineKind::Paragraph:
+                        console.PutText(0, y, PadOrTrim(L"  " + r.pluginText, width), kAttrNormal);
+                        break;
+                    case MarkdownLineKind::Blank:
+                    default:
+                        console.PutText(0, y, PadOrTrim(L"", width), kAttrNormal);
+                        break;
                 }
             } else {
                 console.PutText(0, y, PadOrTrim(L"", width), kAttrNormal);  // blank separator row

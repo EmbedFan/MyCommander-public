@@ -3,6 +3,7 @@
 #include "PathUtil.h"
 #include "Strings.h"
 
+#include <algorithm>
 #include <chrono>
 #include <windows.h>
 #include <shellapi.h>
@@ -282,12 +283,15 @@ RetryOutcome RunWithRetry(const std::wstring& name, const ErrorHandler& onError,
     }
 }
 
-} // namespace
-
-OperationOutcome CopyItems(const fs::path& sourceDir, const std::vector<std::wstring>& items, const fs::path& destDir,
-                           const ConflictHandler& onConflict, const ItemStartHandler& onItemStart,
-                           const CancelPoll& cancelPoll, const ErrorHandler& onError,
-                           const ByteProgressHandler& onByteProgress, const CopyElevationHandler& onElevate) {
+// CopyItems/CopyItemAs's shared engine: each item is (source name within
+// `sourceDir`, target name within `destDir`) -- identical for a plain
+// CopyItems, different for CopyItemAs's single "copy under a new name".
+OperationOutcome CopyItemsImpl(const fs::path& sourceDir,
+                               const std::vector<std::pair<std::wstring, std::wstring>>& items,
+                               const fs::path& destDir, const ConflictHandler& onConflict,
+                               const ItemStartHandler& onItemStart, const CancelPoll& cancelPoll,
+                               const ErrorHandler& onError, const ByteProgressHandler& onByteProgress,
+                               const CopyElevationHandler& onElevate) {
     OperationOutcome outcome;
     bool haveBlanket = false;
     ConflictChoice blanket = ConflictChoice::Cancel;
@@ -295,14 +299,14 @@ OperationOutcome CopyItems(const fs::path& sourceDir, const std::vector<std::wst
     int total = static_cast<int>(items.size());
 
     for (int index = 0; index < total; ++index) {
-        const std::wstring& name = items[index];
+        const std::wstring& name = items[index].first;
         if (onItemStart && !onItemStart(name, index, total)) {
             outcome.cancelled = true;
             break;
         }
 
         fs::path src = sourceDir / name;
-        fs::path dst = destDir / name;
+        fs::path dst = destDir / items[index].second;
         std::error_code ec;
         bool srcIsDir = fs::is_directory(ToLongPath(src), ec);
         bool destExists = fs::exists(ToLongPath(dst), ec);
@@ -336,6 +340,16 @@ OperationOutcome CopyItems(const fs::path& sourceDir, const std::vector<std::wst
             }
         }
 
+        // FOP-019: copying an item onto itself (Shift+F5 confirmed with the
+        // unchanged name, or "Overwrite" on F5 into the same directory) can
+        // never succeed -- "overwrite" would mean truncating the source.
+        // Checked after the conflict prompt, so its Rename choice still
+        // works as a way to duplicate an item in place.
+        if (PathsEquivalent(ToLongPath(src), ToLongPath(finalDst))) {
+            outcome.failed.emplace_back(name, kStrCannotCopyOntoItself);
+            continue;
+        }
+
         std::wstring safetyError = CheckDestinationSafety(src, destDir, srcIsDir, destExists, destIsDir);
         if (!safetyError.empty()) {
             outcome.failed.emplace_back(name, safetyError);
@@ -363,6 +377,26 @@ OperationOutcome CopyItems(const fs::path& sourceDir, const std::vector<std::wst
         // Skipped / FailedNoHandler: outcome already updated inside RunWithRetry; move on to the next item.
     }
     return outcome;
+}
+
+} // namespace
+
+OperationOutcome CopyItems(const fs::path& sourceDir, const std::vector<std::wstring>& items, const fs::path& destDir,
+                           const ConflictHandler& onConflict, const ItemStartHandler& onItemStart,
+                           const CancelPoll& cancelPoll, const ErrorHandler& onError,
+                           const ByteProgressHandler& onByteProgress, const CopyElevationHandler& onElevate) {
+    std::vector<std::pair<std::wstring, std::wstring>> pairs(items.size());
+    std::transform(items.begin(), items.end(), pairs.begin(), [](const std::wstring& name) { return std::make_pair(name, name); });
+    return CopyItemsImpl(sourceDir, pairs, destDir, onConflict, onItemStart, cancelPoll, onError, onByteProgress,
+                         onElevate);
+}
+
+OperationOutcome CopyItemAs(const fs::path& sourceDir, const std::wstring& item, const fs::path& targetPath,
+                            const ConflictHandler& onConflict, const ItemStartHandler& onItemStart,
+                            const CancelPoll& cancelPoll, const ErrorHandler& onError,
+                            const ByteProgressHandler& onByteProgress, const CopyElevationHandler& onElevate) {
+    return CopyItemsImpl(sourceDir, {{item, targetPath.filename().wstring()}}, targetPath.parent_path(), onConflict,
+                         onItemStart, cancelPoll, onError, onByteProgress, onElevate);
 }
 
 OperationOutcome MoveItems(const fs::path& sourceDir, const std::vector<std::wstring>& items, const fs::path& destDir,
@@ -522,7 +556,12 @@ RenameResult RenameItem(const fs::path& directory, const std::wstring& oldName, 
     fs::path src = directory / oldName;
     fs::path dst = directory / newName;
     std::error_code ec;
-    if (oldName != newName && fs::exists(ToLongPath(dst), ec)) {
+    // FOP-017 (D6): a case-only rename ("a.txt" -> "A.TXT") finds the target
+    // "existing" on a case-insensitive file system -- but it's the source
+    // itself, so it's allowed; MoveFileExW performs the case change. Any
+    // other existing target is still refused: rename never overwrites.
+    bool sameItem = _wcsicmp(oldName.c_str(), newName.c_str()) == 0 || PathsEquivalent(ToLongPath(src), ToLongPath(dst));
+    if (oldName != newName && !sameItem && fs::exists(ToLongPath(dst), ec)) {
         result.error = FormatItemAlreadyExists(newName);
         return result;
     }
@@ -534,6 +573,57 @@ RenameResult RenameItem(const fs::path& directory, const std::wstring& oldName, 
     }
     result.ok = true;
     return result;
+}
+
+OperationOutcome RenameItems(const fs::path& directory, const std::vector<RenameStep>& steps,
+                             const ItemStartHandler& onItemStart, const ErrorHandler& onError) {
+    OperationOutcome outcome;
+    bool haveErrorBlanket = false;
+    int total = static_cast<int>(std::count_if(steps.begin(), steps.end(), [](const RenameStep& s) { return !s.fromTemp; }));
+    int started = 0;
+    // Items currently parked under a temporary name: temp -> original.
+    std::vector<std::pair<std::wstring, std::wstring>> atTemp;
+    auto clearTemp = [&](const std::wstring& temp) {
+        atTemp.erase(std::remove_if(atTemp.begin(), atTemp.end(), [&](const auto& p) { return p.first == temp; }),
+                     atTemp.end());
+    };
+
+    for (const RenameStep& step : steps) {
+        if (!step.fromTemp) {
+            if (onItemStart && !onItemStart(step.originalName, started, total)) {
+                outcome.cancelled = true;
+                break;
+            }
+            ++started;
+        } else if (std::none_of(atTemp.begin(), atTemp.end(), [&](const auto& p) { return p.first == step.from; })) {
+            continue;  // its move to the temporary name was skipped/failed: the item never left its original name
+        }
+        RetryOutcome result = RunWithRetry(step.originalName, onError, haveErrorBlanket, outcome,
+                                           [&](std::wstring& err, bool&, DWORD&) {
+                                               RenameResult r = RenameItem(directory, step.from, step.to);
+                                               if (!r.ok) err = r.error;
+                                               return r.ok;
+                                           });
+        if (result == RetryOutcome::Succeeded) {
+            if (step.toTemp) {
+                atTemp.emplace_back(step.to, step.originalName);
+            } else {
+                if (step.fromTemp) clearTemp(step.from);
+                ++outcome.succeeded;
+            }
+        } else if (result == RetryOutcome::Cancelled) {
+            outcome.cancelled = true;
+            break;
+        }
+        // Skipped / failed: an item at a temporary name is rolled back below.
+    }
+
+    // Nobody keeps a "~mcren" name: put every parked item back.
+    for (const auto& [temp, original] : atTemp) {
+        RenameResult back = RenameItem(directory, temp, original);
+        if (!back.ok) outcome.failed.emplace_back(original, FormatRenameRollbackFailed(temp, original, back.error));
+    }
+    return outcome;
 }
 
 CreateDirectoryResult CreateNewDirectory(const fs::path& parentDir, const std::wstring& name) {
@@ -585,6 +675,31 @@ CreateFileResult CreateNewFile(const fs::path& parentDir, const std::wstring& na
 }
 
 namespace {
+
+// IS-0018: sends one item (a file, or a folder with everything in it) to the
+// Recycle Bin. SHFileOperationW takes a double-null-terminated list of full
+// paths and doesn't accept the \\?\ long-path prefix. FOF_SILENT /
+// FOF_NOERRORUI: the shell shows nothing of its own -- MyCommander's
+// animated dialog is the progress UI, and failures are reported through the
+// caller's own Retry/Skip dialog.
+bool RecycleOneItem(const fs::path& target, bool& cancelledOut, std::wstring& err) {
+    std::wstring from = target.wstring();
+    from.push_back(L'\0');  // the string's own terminator supplies the second null
+    SHFILEOPSTRUCTW op{};
+    op.wFunc = FO_DELETE;
+    op.pFrom = from.c_str();
+    op.fFlags = FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_SILENT | FOF_NOERRORUI;
+    int result = SHFileOperationW(&op);
+    if (op.fAnyOperationsAborted) {
+        cancelledOut = true;
+        return false;
+    }
+    if (result != 0) {
+        err = FormatRecycleBinDeleteFailed(result);
+        return false;
+    }
+    return true;
+}
 
 // Recursively deletes `target` without ever traversing into a reparse
 // point's contents: a symlink or junction is removed as a single link
@@ -647,33 +762,12 @@ OperationOutcome DeleteItems(const fs::path& directory, const std::vector<std::w
                              const ErrorHandler& onError, const DeleteElevationHandler& onElevate) {
     OperationOutcome outcome;
 
-    if (!permanent) {
-        // SHFileOperationW takes a double-null-terminated multi-string of full
-        // paths and does not accept the \\?\ long-path prefix.
-        std::wstring multiPath;
-        for (const auto& name : items) {
-            multiPath += (directory / name).wstring();
-            multiPath += L'\0';
-        }
-        multiPath += L'\0';
-
-        SHFILEOPSTRUCTW op{};
-        op.wFunc = FO_DELETE;
-        op.pFrom = multiPath.c_str();
-        op.fFlags = FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_SILENT | FOF_NOERRORUI;
-        int result = SHFileOperationW(&op);
-        if (op.fAnyOperationsAborted) {
-            outcome.cancelled = true;
-        } else if (result == 0) {
-            outcome.succeeded = static_cast<int>(items.size());
-        } else {
-            for (const auto& name : items) {
-                outcome.failed.emplace_back(name, FormatRecycleBinDeleteFailed(result));
-            }
-        }
-        return outcome;
-    }
-
+    // IS-0018: both paths go item by item, so the caller's progress dialog
+    // (onItemStart) counts and animates for a Recycle Bin delete too, Esc is
+    // honored between items, and one failing item is reported -- and offered
+    // Retry/Skip -- on its own. (The Recycle Bin path used to be one batched
+    // shell call: no progress at all, and any error marked *every* item as
+    // failed even though the shell had already recycled the others.)
     bool haveErrorBlanket = false;
     int total = static_cast<int>(items.size());
     for (int index = 0; index < total; ++index) {
@@ -684,13 +778,15 @@ OperationOutcome DeleteItems(const fs::path& directory, const std::vector<std::w
         }
         fs::path target = directory / name;
         std::function<bool(std::wstring&)> elevatedAttempt;
-        if (onElevate) {
+        // SEC-003: elevation is offered for the permanent path only.
+        if (onElevate && permanent) {
             elevatedAttempt = [&](std::wstring& err) { return onElevate(target, err); };
         }
         RetryOutcome result = RunWithRetry(
             name, onError, haveErrorBlanket, outcome,
             [&](std::wstring& err, bool& cancelled, DWORD& win32Error) {
-                return RemoveTreeSafely(target, cancelPoll, cancelled, err, win32Error);
+                if (permanent) return RemoveTreeSafely(target, cancelPoll, cancelled, err, win32Error);
+                return RecycleOneItem(target, cancelled, err);  // win32Error stays 0: no Elevate offer
             },
             elevatedAttempt);
         if (result == RetryOutcome::Succeeded) {

@@ -44,13 +44,20 @@
 // --- Dialog.cpp -----------------------------------------------------------
 
 constexpr const wchar_t* kStrPressAnyKeyToContinue = L"Press any key to continue";
+constexpr const wchar_t* kStrFormDialogHint =
+    L"Up/Down field, Left/Right change, [Enter] OK, [Esc] Cancel";
+constexpr const wchar_t* kStrListDialogHint = L"Up/Down choose, [Enter] OK, [Esc] Cancel";
 
 // --- Viewer.cpp -------------------------------------------------------------
 
 constexpr const wchar_t* kStrViewerEmptyFile = L"(empty file)";
 constexpr const wchar_t* kStrViewerLinePrefix = L"Line ";
-constexpr const wchar_t* kStrViewerHintLine = L"  Esc/F3 Close  /: Search  n: Next";
+constexpr const wchar_t* kStrViewerHintLine = L"  Esc/F3 Close  /: Search  n: Next  H: Hex";
+constexpr const wchar_t* kStrViewerHexHintLine =
+    L"  Esc/F3 Close  H: Text  W: Items/row  Arrows: Move cursor  /: Search  n: Next";
 constexpr const wchar_t* kStrSearchTitle = L"Search";
+constexpr const wchar_t* kStrSearchPromptTitle = L"Find: text, or #hex bytes (e.g. #4D 5A)";
+constexpr const wchar_t* kStrViewerInvalidHex = L"Invalid hex pattern. Use pairs of hex digits, e.g. #4D 5A";
 
 inline std::wstring FormatSearchTermNotFound(const std::wstring& term) {
     return L"\"" + term + L"\" not found";
@@ -94,6 +101,31 @@ constexpr const wchar_t* kStrTypeLink = L"LINK";
 constexpr const wchar_t* kStrSizeColBroken = L"<BROKEN>";
 constexpr const wchar_t* kStrSizeColReparse = L"<REPARSE>";
 constexpr const wchar_t* kStrSizeColDir = L"<DIR>";
+
+// --- main.cpp: background job queue (FOP-014, Phase 3) ----------------------
+
+constexpr const wchar_t* kStrJobsTitle = L"Job queue";
+constexpr const wchar_t* kStrJobsEmpty = L"No background jobs.";
+constexpr const wchar_t* kStrJobsCancelQuestion = L"Cancel this job?";
+constexpr const wchar_t* kStrJobFailedGeneric = L"The background job failed.";
+constexpr const wchar_t* kStrQueuePluginRefused = L"Background copy/move is not available for plugin panels.";
+constexpr const wchar_t* kStrQueueBadDestination = L"The destination folder does not exist.";
+constexpr const wchar_t* kStrQueueDeletePluginRefused = L"Background delete is not available for plugin panels.";
+constexpr const wchar_t* kStrInTheBackgroundSuffix = L" (in the background)";
+constexpr const wchar_t* kStrJobBusyTitle = L"Files in use by a background job";
+constexpr const wchar_t* kStrJobBusyAdvice = L"Wait for it to finish, or cancel it with Alt+Q.";
+constexpr const wchar_t* kStrJobBusyIntro = L"A background job is using these files:";
+constexpr const wchar_t* kStrQuitJobsTitle = L"Background jobs";
+constexpr const wchar_t* kStrQuitWait = L"Wait until they finish, then quit";
+constexpr const wchar_t* kStrQuitCancel = L"Cancel them and quit";
+
+inline std::wstring FormatJobsPending(size_t count) {
+    return std::to_wstring(count) + L" background job(s) still running or queued.";
+}
+
+// --- main.cpp: DirectoryTreeContent (UI-013, Part B) -------------------------
+
+constexpr const wchar_t* kStrTreeContentTitle = L"Directory Tree";
 
 constexpr const wchar_t* kStrTerminalTooSmall = L"Terminal window too small";
 
@@ -165,6 +197,83 @@ inline std::wstring FormatSearchResultsHeader(size_t matchCount, bool truncated,
     return std::to_wstring(matchCount) + L" match(es)" + (truncated ? L" (truncated)" : L"") + L" for \"" + pattern +
           L"\"";
 }
+// SRC-004/005: content search.
+constexpr const wchar_t* kStrNoFilesContain = L"No files contain the text.";
+inline std::wstring FormatContentSearchProgress(const std::wstring& path, const std::wstring& text, size_t files,
+                                                const std::wstring& current) {
+    return L"Searching \"" + path + L"\" for \"" + text + L"\"... " + std::to_wstring(files) +
+           L" files searched, Esc to cancel \x2014 " + current;
+}
+inline std::wstring FormatContentResultsHeader(size_t matchCount, bool truncated, const std::wstring& text,
+                                               size_t unreadable, size_t binarySkipped) {
+    std::wstring h = std::to_wstring(matchCount) + L" file(s) containing \"" + text + L"\"" +
+                     (truncated ? L" (truncated)" : L"");
+    if (unreadable > 0) h += L", " + std::to_wstring(unreadable) + L" unreadable skipped";
+    if (binarySkipped > 0) h += L", " + std::to_wstring(binarySkipped) + L" binary skipped";
+    return h;
+}
+
+// --- main.cpp: compare folders (SRC-006) ------------------------------------
+
+constexpr const wchar_t* kStrCompareTitle = L"Compare folders";
+constexpr const wchar_t* kStrCompareSameFolder = L"Both panels show the same folder.";
+constexpr const wchar_t* kStrCompareNeedsFolders =
+    L"Both panels must show a folder (not an archive or the tree view).";
+constexpr const wchar_t* kStrCompareCannotList = L"This folder can't be listed:";
+constexpr const wchar_t* kStrCompareCancelledNothing = L"Compare cancelled.";
+constexpr const wchar_t* kStrCompareResultsHint =
+    L" Tab: all/differences/left/right  Enter: go to  F3/Shift+F3: view left/right  Alt+F3: differences  "
+    L"F5: synchronize  Esc: close";
+inline std::wstring FormatCompareProgress(size_t items, const std::wstring& bytes, const std::wstring& current) {
+    return L"Comparing... " + std::to_wstring(items) + L" items, " + bytes + L" read, Esc to cancel \x2014 " + current;
+}
+// --- main.cpp: key bindings (KEY-005) ---------------------------------------
+
+constexpr const wchar_t* kStrKeyBindingsWarningTitle = L"Key bindings";
+constexpr const wchar_t* kStrKeyBindingsWarningIntro =
+    L"Some lines in keys.conf were not applied (everything else was):";
+constexpr const wchar_t* kStrCannotCreateKeysFile = L"Could not create the key bindings file:";
+
+// --- main.cpp: synchronize folders (SRC-007) --------------------------------
+
+constexpr const wchar_t* kStrSyncTitle = L"Synchronize folders";
+constexpr const wchar_t* kStrSyncConfirmTitle = L"Synchronize folders?";
+constexpr const wchar_t* kStrSyncNothing = L"Nothing to synchronize \x2014 the folders match.";
+constexpr const wchar_t* kStrSyncTruncated =
+    L"Too many items to synchronize safely. Narrow it with a filter (Ctrl+F) or a subfolder.";
+constexpr const wchar_t* kStrSyncInsideOther = L"One folder is inside the other, so a sync would copy into itself.";
+constexpr const wchar_t* kStrSyncCancelled = L"Cancelled; nothing was changed.";
+constexpr const wchar_t* kStrSyncNothingSelected = L"No actions are selected.";
+constexpr const wchar_t* kStrSyncPreviewHint =
+    L" Space: on/off  Left/Right: copy direction  Del: delete  Tab: filter  F3/Shift+F3: view  F5: synchronize  "
+    L"Esc: cancel";
+constexpr const wchar_t* kStrSyncBackLabel = L"Back to preview";
+constexpr const wchar_t* kStrSyncGoLabel = L"Synchronize";
+constexpr const wchar_t* kStrVerbSync = L"Synchronize";
+constexpr const wchar_t* kStrVerbSyncing = L"Synchronizing";
+constexpr const wchar_t* kStrSyncChangedSincePreview = L"changed since the preview, skipped";
+inline std::wstring FormatSyncTotals(size_t copyRight, const std::wstring& bytesRight, size_t copyLeft,
+                                     const std::wstring& bytesLeft, size_t overwrite, size_t deleteRight,
+                                     size_t deleteLeft, size_t conflicts) {
+    std::wstring s = L"Copy " + std::to_wstring(copyRight) + L" -> (" + bytesRight + L")";
+    if (copyLeft > 0) s += L", " + std::to_wstring(copyLeft) + L" <- (" + bytesLeft + L")";
+    if (overwrite > 0) s += L", " + std::to_wstring(overwrite) + L" overwrite";
+    if (deleteRight > 0) s += L", delete " + std::to_wstring(deleteRight) + L" on the right";
+    if (deleteLeft > 0) s += L", delete " + std::to_wstring(deleteLeft) + L" on the left";
+    if (conflicts > 0) s += L", " + std::to_wstring(conflicts) + L" unresolved conflict(s) left alone";
+    return s;
+}
+
+// "12 different, 5 left only, 3 right only, 140 identical"
+inline std::wstring FormatCompareSummary(size_t different, size_t leftOnly, size_t rightOnly, size_t identical,
+                                         size_t unreadable, bool cancelled, bool truncated) {
+    std::wstring s = std::to_wstring(different) + L" different, " + std::to_wstring(leftOnly) + L" left only, " +
+                     std::to_wstring(rightOnly) + L" right only, " + std::to_wstring(identical) + L" identical";
+    if (unreadable > 0) s += L", " + std::to_wstring(unreadable) + L" unreadable";
+    if (cancelled) s += L" (cancelled)";
+    if (truncated) s += L" (truncated)";
+    return s;
+}
 
 // --- main.cpp: drive selection ---------------------------------------------
 
@@ -202,6 +311,68 @@ constexpr const wchar_t* kStrYesCreateItLabel = L"es, create it";
 constexpr const wchar_t* kStrNoCancelLabel = L"o, cancel";
 constexpr const wchar_t* kStrCannotCreateDestinationTitle = L"Cannot create destination";
 constexpr const wchar_t* kStrIsNotADirectory = L"is not a directory.";
+
+// --- main.cpp: FOP-017 group rename --------------------------------------------
+
+constexpr const wchar_t* kStrGroupRenameTitle = L"Group rename";
+constexpr const wchar_t* kStrGroupRenameHint = L"[Enter] rename  [F2] change options  [Esc] cancel";
+constexpr const wchar_t* kStrGroupRenamePluginRefused = L"Group rename is not available for plugin panels.";
+constexpr const wchar_t* kStrGroupRenameNothing = L"Nothing to rename: every new name equals the old one.";
+constexpr const wchar_t* kStrGroupRenameFixFirst = L"Fix these problems first (F2 changes the options):";
+constexpr const wchar_t* kStrGroupRenameUnchanged = L"(unchanged)";
+constexpr const wchar_t* kStrVerbRenaming = L"Renaming";
+constexpr const wchar_t* kStrVerbGroupRename = L"Group rename";
+inline std::wstring FormatGroupRenameTitle(size_t total, size_t toRename, size_t unchanged) {
+    return L"Group rename: " + std::to_wstring(total) + L" items, " + std::to_wstring(toRename) + L" to rename, " +
+           std::to_wstring(unchanged) + L" unchanged";
+}
+inline std::wstring FormatGroupRenameProblemsTitle(size_t problems) {
+    return L"Group rename: " + std::to_wstring(problems) + L" problem(s) \x2014 press F2 to fix the options";
+}
+
+// --- main.cpp: NAV-007 directory hotlist ---------------------------------------
+
+constexpr const wchar_t* kStrHotlistTitle = L"Directory hotlist";
+constexpr const wchar_t* kStrHotlistHint = L"[Enter] go  [Del] remove  [F2] rename  [Esc] close";
+constexpr const wchar_t* kStrHotlistAddPrompt = L"Name for this favorite:";
+constexpr const wchar_t* kStrHotlistRenamePrompt = L"Rename favorite:";
+constexpr const wchar_t* kStrHotlistRemoveTitle = L"Remove favorite?";
+constexpr const wchar_t* kStrHotlistInvalidName = L"A name can't be empty or contain '='.";
+constexpr const wchar_t* kStrHotlistCannotSave = L"Could not save favorites.conf.";
+constexpr const wchar_t* kStrHotlistWarningIntro = L"Some lines in favorites.conf were skipped:";
+inline std::wstring FormatHotlistAddRow(const std::wstring& folder) { return L"+ Add current folder (" + folder + L")"; }
+inline std::wstring FormatHotlistAlreadyThere(const std::wstring& name) {
+    return L"This folder is already in the hotlist as \"" + name + L"\".";
+}
+
+// --- main.cpp: FEA-0009 file actions -----------------------------------------
+
+constexpr const wchar_t* kStrFileActionsWarningTitle = L"File actions";
+constexpr const wchar_t* kStrFileActionsWarningIntro = L"Some lines in file-actions.conf were skipped:";
+constexpr const wchar_t* kStrCannotRunFileActionTitle = L"Cannot run file action";
+constexpr const wchar_t* kStrProgramLabel = L"Program: ";
+constexpr const wchar_t* kStrAssignFileToAppTitle = L"Assign File to App";
+constexpr const wchar_t* kStrAssignNeedsFile = L"Put the cursor on a file first.";
+constexpr const wchar_t* kStrAddFileAction = L"+ Add a new action...";
+// EXT-003: viewer plugins.
+constexpr const wchar_t* kStrAddViewerPlugin = L"+ Use a viewer plugin as the default view...";
+constexpr const wchar_t* kStrViewerPluginTitle = L"Viewer plugin";
+constexpr const wchar_t* kStrPluginSuffix = L" (plugin)";
+inline std::wstring FormatViewerPluginFailed(const std::wstring& viewer) {
+    return L"\"" + viewer + L"\" could not show this file (not loaded, declined, or failed) -- opening the built-in viewer.";
+}
+constexpr const wchar_t* kStrEditFileActionsFile = L"  Edit file-actions.conf in the external editor";
+constexpr const wchar_t* kStrCannotSaveFileActions = L"Could not save file-actions.conf.";
+constexpr const wchar_t* kStrProgramRequired = L"A program is required.";
+constexpr const wchar_t* kStrRemoveFileActionQuestion = L"Remove this action?";
+constexpr const wchar_t* kStrBuiltinViewerLabel = L"Built-in viewer";
+constexpr const wchar_t* kStrWindowsDefaultLabel = L"Windows default";
+inline std::wstring FormatChooseActionTitle(const std::wstring& name) { return L"Actions for \"" + name + L"\""; }
+inline std::wstring FormatFileActionsForTitle(const std::wstring& pattern) { return L"File actions for " + pattern; }
+
+// FOP-019: Shift+F5 "copy as" prompt and its errors.
+inline std::wstring FormatCopyAsHeader(const std::wstring& name) { return L"Copy \"" + name + L"\" as:"; }
+constexpr const wchar_t* kStrCopyAsSameItem = L"The new name is the same as the original.";
 
 inline std::wstring FormatItemsToDestinationHeader(const std::wstring& verb, size_t itemCount) {
     return verb + L" " + std::to_wstring(itemCount) + L" item(s) to:";
@@ -253,6 +424,10 @@ constexpr const wchar_t* kStrCannotEnter = L"Cannot enter: ";
 // "confirmrecyclebindelete") are config-file syntax, not prose — same
 // exclusion as the rest of Config.cpp's literals (see the top-of-file note).
 
+inline std::wstring FormatConfigFileActionLineWarning(int lineNumber, const std::wstring& rawLine) {
+    return L"Line " + std::to_wstring(lineNumber) + L" looks like a file action (" + rawLine +
+           L") -- those only work in file-actions.conf, not here. Open it via File > Assign File to App.";
+}
 inline std::wstring FormatConfigLineSyntaxWarning(int lineNumber, const std::wstring& rawLine) {
     return L"Line " + std::to_wstring(lineNumber) + L": expected \"key = value\", got: " + rawLine;
 }
@@ -270,6 +445,7 @@ constexpr const wchar_t* kStrInvalidName = L"invalid name";
 constexpr const wchar_t* kStrNameReservedCharacter = L"name contains a character reserved by Windows (\\ / : * ? \" < > |)";
 constexpr const wchar_t* kStrRefusingReparseCopy = L"refusing to copy the contents of a reparse point/junction";
 constexpr const wchar_t* kStrCannotPlaceDirectoryInsideItself = L"cannot place a directory inside itself";
+constexpr const wchar_t* kStrCannotCopyOntoItself = L"source and destination are the same item";
 constexpr const wchar_t* kStrCannotOverwriteFileWithDirectory = L"cannot overwrite an existing file with a directory";
 constexpr const wchar_t* kStrCannotOverwriteDirectoryWithFile = L"cannot overwrite an existing directory with a file";
 constexpr const wchar_t* kStrSourceAndDestinationSame = L"source and destination are the same directory";
@@ -288,6 +464,11 @@ inline std::wstring FormatCannotRename(const std::wstring& oldName, const std::w
                                        const std::wstring& sysMessage) {
     return L"cannot rename \"" + oldName + L"\" to \"" + newName + L"\": " + sysMessage;
 }
+// FOP-017: an item parked under a temporary name couldn't be put back (ERR-001: names both).
+inline std::wstring FormatRenameRollbackFailed(const std::wstring& tempName, const std::wstring& originalName,
+                                               const std::wstring& reason) {
+    return L"left as \"" + tempName + L"\" -- could not rename it back to \"" + originalName + L"\": " + reason;
+}
 inline std::wstring FormatCannotCreate(const std::wstring& path, const std::wstring& sysMessage) {
     return L"cannot create \"" + path + L"\": " + sysMessage;
 }
@@ -300,4 +481,47 @@ inline std::wstring FormatRecycleBinDeleteFailed(int resultCode) {
 inline std::wstring FormatCopiedButCouldNotRemoveSource(const std::wstring& finalDst, const std::wstring& src,
                                                         const std::wstring& sysMessage) {
     return L"copied to \"" + finalDst + L"\", but could not remove source \"" + src + L"\": " + sysMessage;
+}
+
+// --- main.cpp: top menu bar (FEA-0005) --------------------------------------
+
+constexpr const wchar_t* kStrMenuNotImplementedTitle = L"Not yet implemented";
+constexpr const wchar_t* kStrMenuNotImplementedBody =
+   L"This menu item doesn't have a feature behind it yet.";
+
+// --- main.cpp: file properties (FEA-0003) -----------------------------------
+
+constexpr const wchar_t* kStrFilePropertiesTitle = L"File properties";
+constexpr const wchar_t* kStrPropNotSigned = L"Not signed.";
+constexpr const wchar_t* kStrPropSignedUnknownSigner = L"Signed.";
+constexpr const wchar_t* kStrPropSignatureCheckFailed = L"Could not check the file's signature.";
+
+inline std::wstring FormatPropLine(const wchar_t* label, const std::wstring& value) {
+   return std::wstring(label) + L": " + value;
+}
+inline std::wstring FormatPropSignedBy(const std::wstring& signerName) {
+   return L"Signed by: " + signerName;
+}
+
+// --- DiffViewer.cpp / main.cpp: text difference viewer (SRC-008) ------------
+
+constexpr const wchar_t* kStrDiffTitle = L"Compare contents";
+constexpr const wchar_t* kStrDiffHint =
+    L"F7/Shift+F7: next/prev difference  U: unified  I: case  W: whitespace  F3/Shift+F3: view  Esc: close";
+constexpr const wchar_t* kStrDiffIdentical = L"Identical";
+constexpr const wchar_t* kStrDiffCaseLabel = L"case: ";
+constexpr const wchar_t* kStrDiffWhitespaceLabel = L"whitespace: ";
+constexpr const wchar_t* kStrDiffIgnored = L"ignored";
+constexpr const wchar_t* kStrDiffExact = L"exact";
+constexpr const wchar_t* kStrDiffWhitespaceExact = L"exact";
+constexpr const wchar_t* kStrDiffWhitespaceTrailing = L"trailing ignored";
+constexpr const wchar_t* kStrDiffWhitespaceAll = L"all ignored";
+constexpr const wchar_t* kStrDiffNoMore = L"(no more differences)";
+constexpr const wchar_t* kStrDiffRecomputeCancelled = L"(cancelled -- previous comparison kept)";
+constexpr const wchar_t* kStrDiffTooDifferent = L"(too different to align -- previous comparison kept)";
+constexpr const wchar_t* kStrDiffFilesIdentical = L"The files are identical.";
+constexpr const wchar_t* kStrDiffTooDifferentLong =
+    L"The files are too different to align line by line (more than 20,000 changes).";
+inline std::wstring FormatDiffProgress(size_t edits, size_t limit) {
+    return L"Comparing files... " + std::to_wstring(edits) + L" / " + std::to_wstring(limit) + L" steps, Esc to cancel";
 }

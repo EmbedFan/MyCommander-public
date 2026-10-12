@@ -111,6 +111,18 @@ OperationOutcome CopyItems(const std::filesystem::path& sourceDir, const std::ve
                            const ByteProgressHandler& onByteProgress = ByteProgressHandler{},
                            const CopyElevationHandler& onElevate = CopyElevationHandler{});
 
+// FOP-019 (Shift+F5): copies the single entry `item` of `sourceDir` to the
+// explicit full `targetPath` -- typically the same directory under a new
+// name. Exactly CopyItems' engine (conflict prompt, retry, progress,
+// elevation, safety guards) with the target's own filename instead of
+// `item`'s; `targetPath.parent_path()` must already exist.
+OperationOutcome CopyItemAs(const std::filesystem::path& sourceDir, const std::wstring& item,
+                            const std::filesystem::path& targetPath, const ConflictHandler& onConflict,
+                            const ItemStartHandler& onItemStart, const CancelPoll& cancelPoll,
+                            const ErrorHandler& onError = ErrorHandler{},
+                            const ByteProgressHandler& onByteProgress = ByteProgressHandler{},
+                            const CopyElevationHandler& onElevate = CopyElevationHandler{});
+
 // Moves each of `items` into `destDir`. Uses a rename/MoveFileWithProgress
 // fast path when possible, falling back to copy-then-delete-source across
 // volumes or when merging into an existing directory. See CopyItems for
@@ -159,6 +171,31 @@ struct RenameResult {
 RenameResult RenameItem(const std::filesystem::path& directory, const std::wstring& oldName,
                         const std::wstring& newName);
 
+// FOP-017: one rename in a group-rename run, in execution order
+// (MultiRename.h's OrderRenames produces these). A swap or cycle is broken
+// with a temporary name: one step to it (`toTemp`), a later step from it
+// (`fromTemp`). `originalName` is the item's name before the whole run --
+// what progress shows, and what a stranded temporary name is rolled back to.
+struct RenameStep {
+    std::wstring from;
+    std::wstring to;
+    std::wstring originalName;
+    bool toTemp = false;
+    bool fromTemp = false;
+};
+
+// FOP-017: runs `steps` in `directory`, item by item: `onItemStart` once per
+// user-visible item (on its first step) for progress and Esc (PER-002), and
+// each step through the same Retry/Skip/Skip all/Cancel handling as
+// Copy/Move/Delete (`onError`, FOP-010) -- RenameItem underneath, so nothing
+// is ever overwritten. An item left at a temporary name (its later step
+// skipped or failed, or the run cancelled first) is renamed back to its
+// original name; if even that fails, the outcome names both. `succeeded`
+// counts items that reached their final name.
+OperationOutcome RenameItems(const std::filesystem::path& directory, const std::vector<RenameStep>& steps,
+                             const ItemStartHandler& onItemStart = ItemStartHandler{},
+                             const ErrorHandler& onError = ErrorHandler{});
+
 struct CreateDirectoryResult {
     bool ok = false;
     std::wstring error;
@@ -181,13 +218,12 @@ CreateFileResult CreateNewFile(const std::filesystem::path& parentDir, const std
 // Deletes each of `items` from `directory`. `permanent` bypasses the Recycle
 // Bin (FOP-007); the non-permanent path uses SHFileOperationW, which does
 // not support the long-path \\?\ prefix, so very long paths may need the
-// permanent path instead. `onItemStart`/`cancelPoll`/`onError`/`onElevate`
-// (PER-002/FOP-010/SEC-003) only apply to the permanent path, which deletes
-// item-by-item; the Recycle Bin path is a single batched shell call with no
-// per-item progress or retry point — it's typically fast (moving to the
-// Recycle Bin, not erasing content) so the lack of mid-operation
-// responsiveness there is much less consequential than for a large
-// permanent delete.
+// permanent path instead. Both paths go item by item (IS-0018):
+// `onItemStart` (PER-002 progress, and Esc between items) and `onError`
+// (FOP-010 Retry/Skip/Skip all/Cancel, per item) apply to both, and the
+// outcome counts each item exactly. `cancelPoll` additionally interrupts a
+// permanent delete mid-tree; a single item's Recycle Bin shell call can't
+// be interrupted. `onElevate` (SEC-003) applies to the permanent path only.
 OperationOutcome DeleteItems(const std::filesystem::path& directory, const std::vector<std::wstring>& items,
                              bool permanent, const ItemStartHandler& onItemStart = ItemStartHandler{},
                              const CancelPoll& cancelPoll = CancelPoll{}, const ErrorHandler& onError = ErrorHandler{},

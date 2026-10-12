@@ -1,0 +1,45 @@
+// IS-0011: copy this file into your own plugin project (alongside your own
+// Version.h that defines MCPLUGIN_VERSION_MAJOR/MINOR/PATCH/BUILD -- see
+// McPluginVersion.h's own doc comment), rename it to match your plugin, add
+// it to your .vcxproj as a ResourceCompile item, and fill in the five
+// placeholder VALUE strings below to match your own McPluginMetadata. See
+// Source/ZipPlugin/Version.h and Source/ZipPlugin/ZipPlugin.rc for a
+// complete, real, already-wired-up example of exactly this pattern.
+//
+// This gives your plugin DLL the same kind of embedded Windows file-version
+// resource MyCommander.exe itself has (MyCommander.rc) -- without it,
+// Alt+Enter (File Properties) on your plugin's own .dll shows no version
+// info at all, even though FileInfo.cpp already reads it generically for
+// any .dll.
+
+#include <winres.h>
+#include "Version.h"  // your own plugin's Version.h, defining MCPLUGIN_VERSION_*
+
+VS_VERSION_INFO VERSIONINFO
+ FILEVERSION MCPLUGIN_VERSION_MAJOR,MCPLUGIN_VERSION_MINOR,MCPLUGIN_VERSION_PATCH,MCPLUGIN_VERSION_BUILD
+ PRODUCTVERSION MCPLUGIN_VERSION_MAJOR,MCPLUGIN_VERSION_MINOR,MCPLUGIN_VERSION_PATCH,MCPLUGIN_VERSION_BUILD
+ FILEFLAGSMASK VS_FFI_FILEFLAGSMASK
+ FILEFLAGS 0x0L
+ FILEOS VOS_NT_WINDOWS32
+ FILETYPE VFT_DLL
+ FILESUBTYPE VFT2_UNKNOWN
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904B0"
+        BEGIN
+            VALUE "CompanyName", "Your Name or Organization"
+            VALUE "FileDescription", "Your Plugin's Display Name -- match McPluginMetadata::description"
+            VALUE "FileVersion", MCPLUGIN_VERSION_STR
+            VALUE "InternalName", "YourPluginDllBaseName"
+            VALUE "LegalCopyright", "Copyright (C) Your Name"
+            VALUE "OriginalFilename", "YourPlugin.dll"
+            VALUE "ProductName", "Your Plugin's Display Name -- match McPluginMetadata::name"
+            VALUE "ProductVersion", MCPLUGIN_VERSION_STR
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END

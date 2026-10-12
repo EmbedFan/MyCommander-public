@@ -1,0 +1,139 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <!-- EXT-005: the FTP MC Plugin, a standalone project like Source/ZipPlugin/
+       (deliberately NOT part of MyCommander.sln). $(SolutionDir) doesn't
+       resolve here, so every path is $(ProjectDir)-relative. Sources are
+       compiled as UTF-8 (/utf-8): some string literals contain non-ASCII
+       text. The panel/transfer UI is the shared ..\PluginCommon\ remote
+       panel (EXT-004), also compiled into SftpPlugin. No third-party code: Winsock2 (ws2_32) and the Credential
+       Manager (advapi32) are linked via #pragma comment in the sources.
+       See AIPrompt/features/EXT-005-plan.md. -->
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Debug|x64">
+      <Configuration>Debug</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Release|x64">
+      <Configuration>Release</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+  </ItemGroup>
+  <PropertyGroup Label="Globals">
+    <VCProjectVersion>17.0</VCProjectVersion>
+    <ProjectGuid>{5C3E9D2A-7B41-4F8E-9A16-2D0C8E4B7F31}</ProjectGuid>
+    <RootNamespace>FtpPlugin</RootNamespace>
+    <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
+    <Keyword>Win32Proj</Keyword>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'" Label="Configuration">
+    <ConfigurationType>DynamicLibrary</ConfigurationType>
+    <UseDebugLibraries>true</UseDebugLibraries>
+    <PlatformToolset>v143</PlatformToolset>
+    <CharacterSet>Unicode</CharacterSet>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'" Label="Configuration">
+    <ConfigurationType>DynamicLibrary</ConfigurationType>
+    <UseDebugLibraries>false</UseDebugLibraries>
+    <PlatformToolset>v143</PlatformToolset>
+    <WholeProgramOptimization>true</WholeProgramOptimization>
+    <CharacterSet>Unicode</CharacterSet>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <ImportGroup Label="ExtensionSettings">
+  </ImportGroup>
+  <ImportGroup Label="Shared">
+  </ImportGroup>
+  <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
+  </ImportGroup>
+  <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
+  </ImportGroup>
+  <PropertyGroup Label="UserMacros" />
+  <PropertyGroup>
+    <OutDir Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">$(ProjectDir)Build\$(Platform)\$(Configuration)\</OutDir>
+    <IntDir Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">$(ProjectDir)Build\Intermediate\$(Platform)\$(Configuration)\</IntDir>
+    <OutDir Condition="'$(Configuration)|$(Platform)'=='Release|x64'">$(ProjectDir)Build\$(Platform)\$(Configuration)\</OutDir>
+    <IntDir Condition="'$(Configuration)|$(Platform)'=='Release|x64'">$(ProjectDir)Build\Intermediate\$(Platform)\$(Configuration)\</IntDir>
+  </PropertyGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+    <ClCompile>
+      <WarningLevel>Level4</WarningLevel>
+      <SDLCheck>true</SDLCheck>
+      <PreprocessorDefinitions>_DEBUG;_WINDOWS;_USRDLL;UNICODE;_UNICODE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <ConformanceMode>true</ConformanceMode>
+      <LanguageStandard>stdcpp20</LanguageStandard>
+      <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
+      <RuntimeLibrary>MultiThreadedDebug</RuntimeLibrary>
+    </ClCompile>
+    <Link>
+      <SubSystem>Windows</SubSystem>
+      <GenerateDebugInformation>true</GenerateDebugInformation>
+    </Link>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <ClCompile>
+      <WarningLevel>Level4</WarningLevel>
+      <SDLCheck>true</SDLCheck>
+      <FunctionLevelLinking>true</FunctionLevelLinking>
+      <IntrinsicFunctions>true</IntrinsicFunctions>
+      <PreprocessorDefinitions>NDEBUG;_WINDOWS;_USRDLL;UNICODE;_UNICODE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <ConformanceMode>true</ConformanceMode>
+      <LanguageStandard>stdcpp20</LanguageStandard>
+      <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
+      <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
+    </ClCompile>
+    <Link>
+      <SubSystem>Windows</SubSystem>
+      <EnableCOMDATFolding>true</EnableCOMDATFolding>
+      <OptimizeReferences>true</OptimizeReferences>
+      <GenerateDebugInformation>true</GenerateDebugInformation>
+    </Link>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup>
+    <!-- Same as ZipPlugin: copy the DLL into each MyCommander build output's
+         Plugins folder so a Debug/Release run of the app discovers it. -->
+    <PostBuildEvent>
+      <Command>if not exist "$(ProjectDir)..\..\Build\$(Platform)\$(Configuration)\Plugins" mkdir "$(ProjectDir)..\..\Build\$(Platform)\$(Configuration)\Plugins"
+copy /Y "$(TargetPath)" "$(ProjectDir)..\..\Build\$(Platform)\$(Configuration)\Plugins\"
+if not exist "$(ProjectDir)..\MyCommander\Build\$(Platform)\$(Configuration)\Plugins" mkdir "$(ProjectDir)..\MyCommander\Build\$(Platform)\$(Configuration)\Plugins"
+copy /Y "$(TargetPath)" "$(ProjectDir)..\MyCommander\Build\$(Platform)\$(Configuration)\Plugins\"</Command>
+      <Message>Copying $(TargetFileName) into each MyCommander build output's Plugins folder</Message>
+    </PostBuildEvent>
+  </ItemDefinitionGroup>
+  <ItemGroup>
+    <ClCompile Include="FtpPlugin.cpp" />
+    <ClCompile Include="FtpClient.cpp" />
+    <ClCompile Include="FtpParse.cpp" />
+    <ClCompile Include="FtpConnections.cpp" />
+    <ClCompile Include="..\PluginCommon\RemotePanel.cpp" />
+    <ClCompile Include="..\PluginCommon\RemoteConnections.cpp" />
+    <ClCompile Include="..\PluginCommon\RemoteUi.cpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="..\MyCommanderPluginSdk\McPluginAbi.h" />
+    <ClInclude Include="..\MyCommanderPluginSdk\McPluginHost.h" />
+    <ClInclude Include="..\MyCommanderPluginSdk\McPluginTypes.h" />
+    <ClInclude Include="..\MyCommanderPluginSdk\McPluginVersion.h" />
+    <ClInclude Include="FtpClient.h" />
+    <ClInclude Include="FtpParse.h" />
+    <ClInclude Include="FtpConnections.h" />
+    <ClInclude Include="FtpPluginUi.h" />
+    <ClInclude Include="..\PluginCommon\RemoteTypes.h" />
+    <ClInclude Include="..\PluginCommon\RemoteClient.h" />
+    <ClInclude Include="..\PluginCommon\RemotePanel.h" />
+    <ClInclude Include="..\PluginCommon\RemoteConnections.h" />
+    <ClInclude Include="..\PluginCommon\RemoteUi.h" />
+    <ClInclude Include="Version.h" />
+  </ItemGroup>
+  <ItemGroup>
+    <ResourceCompile Include="FtpPlugin.rc" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="FtpPluginTests.cpp" />
+  </ItemGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+  <ImportGroup Label="ExtensionTargets">
+  </ImportGroup>
+</Project>

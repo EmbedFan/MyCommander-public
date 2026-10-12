@@ -45,3 +45,7 @@ Build/
 # generated contents.
 Source/MyCommanderSetup/payload/*
 !Source/MyCommanderSetup/payload/README.txt
+
+# By hand
+# Result files of cppcheck
+cpp-check/tux-req-editor-cppcheck-build-dir/*

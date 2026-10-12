@@ -1,0 +1,36 @@
+// IS-0011: gives ZipPlugin.dll the same kind of embedded Windows
+// file-version resource MyCommander.exe itself has (MyCommander.rc) -- see
+// Source/MyCommanderPluginSdk/PluginVersionTemplate.rc for the generic,
+// copy-and-customize version of this file any other plugin can start from.
+
+#include <winres.h>
+#include "Version.h"
+
+VS_VERSION_INFO VERSIONINFO
+ FILEVERSION MCPLUGIN_VERSION_MAJOR,MCPLUGIN_VERSION_MINOR,MCPLUGIN_VERSION_PATCH,MCPLUGIN_VERSION_BUILD
+ PRODUCTVERSION MCPLUGIN_VERSION_MAJOR,MCPLUGIN_VERSION_MINOR,MCPLUGIN_VERSION_PATCH,MCPLUGIN_VERSION_BUILD
+ FILEFLAGSMASK VS_FFI_FILEFLAGSMASK
+ FILEFLAGS 0x0L
+ FILEOS VOS_NT_WINDOWS32
+ FILETYPE VFT_DLL
+ FILESUBTYPE VFT2_UNKNOWN
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904B0"
+        BEGIN
+            VALUE "CompanyName", "MyCommander project"
+            VALUE "FileDescription", "ZIP Plugin for MyCommander"
+            VALUE "FileVersion", MCPLUGIN_VERSION_STR
+            VALUE "InternalName", "ZipPlugin"
+            VALUE "LegalCopyright", "Copyright (C) Attila Gallai 1985 - 2026"
+            VALUE "OriginalFilename", "ZipPlugin.dll"
+            VALUE "ProductName", "ZIP Plugin"
+            VALUE "ProductVersion", MCPLUGIN_VERSION_STR
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END

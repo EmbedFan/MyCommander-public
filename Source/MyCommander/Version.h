@@ -5,15 +5,15 @@
 // "File Info" visible in Explorer's file Properties > Details tab) and the
 // app's own `--version` output both derive from these same macros, so
 // there is nothing else to update.
-#define MC_VERSION_MAJOR 0
-#define MC_VERSION_MINOR 1
-#define MC_VERSION_PATCH 61
-#define MC_VERSION_BUILD 253
+#define MC_VERSION_MAJOR 2
+#define MC_VERSION_MINOR 0
+#define MC_VERSION_PATCH 0
+#define MC_VERSION_BUILD 368
 
 #define MC_STRINGIZE_IMPL(x) #x
 #define MC_STRINGIZE(x) MC_STRINGIZE_IMPL(x)
 
-// "0.1.0.0" — usable from both C++ (narrow string) and the .rc compiler.
+// "1.2.0.0" — usable from both C++ (narrow string) and the .rc compiler.
 // To print it with wprintf, use %S (MSVC's "narrow string" specifier for
 // wide-character printf functions) rather than trying to build a wide
 // version of this macro: prefixing a multi-token macro expansion with `L`

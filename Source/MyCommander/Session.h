@@ -5,11 +5,13 @@
 
 namespace mc {
 
-// NAV-008/ERR-006: this deliberately contains only cosmetic panel locations.
-// It must never grow operation, selection, command, or other actionable state.
+// NAV-008/ERR-006: this deliberately contains only cosmetic state -- the two
+// panel locations and (UI-013) the single-panel layout. It must never grow
+// operation, selection, command, or other actionable state.
 struct SessionState {
     std::optional<std::filesystem::path> leftPath;
     std::optional<std::filesystem::path> rightPath;
+    bool singlePanel = false;  // UI-013 Part A; absent from older files = dual-pane
 };
 
 // Separate from Config: the session file is read only after a previous clean

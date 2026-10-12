@@ -18,7 +18,10 @@ namespace mc {
 // no other more specific handler — F3/F4 always mean View/Edit regardless
 // of this) does. View (the historical, hardcoded behavior) is the default
 // so a missing config file changes nothing (CFG-003).
-enum class EnterFileAction { View, Edit, Execute };
+// FEA-0009: View runs the file's default registered "view" action
+// (file-actions.conf, falling back to the built-in viewer); Open runs its
+// default "open" action (falling back to the Windows association).
+enum class EnterFileAction { View, Edit, Execute, Open };
 
 // UI-005: an optional panel-row column. Name itself isn't included here —
 // it's always shown first and isn't a meaningful "hide" choice, unlike
@@ -105,6 +108,19 @@ struct Config {
     // console-subsystem editor sharing this console window, which the
     // non-blocking path doesn't hand off to cleanly.
     bool waitForEditorToClose = false;
+    // FEA-0002 Phase 1: plugin ids (Source/MyCommanderPluginSdk's
+    // McPluginMetadata::id) to identify but never activate past that point
+    // -- checked before PluginManager ever calls LoadLibraryW for that
+    // plugin's DLL, so a problematic plugin can always be turned off
+    // without deleting or moving its file. Empty by default: a missing
+    // config file, or one predating this setting, disables nothing (CFG-003).
+    std::vector<std::wstring> disabledPluginIds;
+    // SRC-008: an external difference tool for File > Compare contents
+    // (Alt+F3) -- a program path followed by its arguments, with %1 / %2
+    // replaced by the left / right file, quoted by the user like a file
+    // action ("C:\...\WinMergeU.exe" "%1" "%2"). Empty (default) uses the
+    // built-in difference viewer; Shift with the command always does.
+    std::wstring diffProgram;
 };
 
 // CFG-005: one human-readable line per setting LoadConfigFrom couldn't
@@ -159,5 +175,16 @@ void EnsureConfigFileExists();
 // for append.
 std::vector<std::wstring> AppendMissingConfigKeys(const std::filesystem::path& path,
                                                    const std::set<std::wstring>& presentKeys);
+
+// FEA-0005: rewrites one already-recognized key's value in place at `path`
+// (its canonical spelling, e.g. "colorTheme"), preserving every other line
+// — comments, other settings — untouched. Unlike AppendMissingConfigKeys
+// (which only ever adds a key that's entirely absent), this replaces an
+// existing key's value; if the key isn't present at all, it's appended as
+// a plain "key = value" line (no comment block — that edge case only
+// happens if a user hand-deleted one line from an otherwise-normal file;
+// EnsureConfigFileExistsAt already writes every recognized key on first
+// run). Returns false if `path` is empty or can't be read.
+bool UpdateConfigValue(const std::filesystem::path& path, const std::wstring& key, const std::wstring& newValue);
 
 }  // namespace mc

@@ -64,6 +64,37 @@ TEST_CASE(LoadConfigFrom_ParsesExecuteEnterFileAction_IsCaseInsensitive) {
     CHECK(result.warnings.empty());
 }
 
+TEST_CASE(LoadConfigFrom_ParsesOpenEnterFileAction_FEA0009) {
+    test::TempDir dir;
+    auto path = dir.Path() / L"mycommander.ini";
+    test::WriteFileContent(path, "enterFileAction = Open\n");
+
+    auto result = LoadConfigFrom(path);
+
+    CHECK(result.config.enterFileAction == EnterFileAction::Open);
+    CHECK(result.warnings.empty());
+}
+
+// FEA-0009: file-action lines typed into mycommander.ini (Ctrl+F11 opens it)
+// get a warning that names the right file, instead of a generic syntax
+// warning plus silently ignored "view = ..." keys.
+TEST_CASE(LoadConfigFrom_FileActionLinesInIni_WarnAndPointToFileActionsConf_FEA0009) {
+    test::TempDir dir;
+    auto path = dir.Path() / L"mycommander.ini";
+    test::WriteFileContent(path,
+                           "colorTheme = default\n"
+                           "[.md .html]\n"
+                           "view  = Edge | msedge.exe | \"%f\"\n"
+                           "open* = Edge | msedge.exe | \"%f\"\n");
+
+    auto result = LoadConfigFrom(path);
+
+    CHECK(result.warnings.size() == 3);
+    for (const auto& w : result.warnings) CHECK(w.find(L"file-actions.conf") != std::wstring::npos);
+    if (result.warnings.size() == 3) CHECK(result.warnings[0].find(L"Line 2") != std::wstring::npos);
+    CHECK(result.presentKeys.count(L"view") == 0);
+}
+
 TEST_CASE(LoadConfigFrom_InvalidEnterFileActionValue_IsReportedAndKeepsDefault_CFG005) {
     test::TempDir dir;
     auto path = dir.Path() / L"mycommander.ini";
@@ -541,4 +572,71 @@ TEST_CASE(AppendMissingConfigKeys_AppendsOnlyTheMissingOnes_LeavesExistingLinesU
 TEST_CASE(AppendMissingConfigKeys_EmptyPathIsANoOp_IS0006) {
     auto added = AppendMissingConfigKeys(std::filesystem::path{}, {});
     CHECK(added.empty());
+}
+
+TEST_CASE(UpdateConfigValue_ReplacesAnExistingKeysValueInPlace_FEA0005) {
+    test::TempDir dir;
+    auto path = dir.Path() / L"mycommander.ini";
+    EnsureConfigFileExistsAt(path);
+
+    bool ok = mc::UpdateConfigValue(path, L"colorTheme", L"highcontrast");
+
+    CHECK(ok);
+    auto after = LoadConfigFrom(path);
+    CHECK(after.config.colorTheme == ColorTheme::HighContrast);
+}
+
+TEST_CASE(UpdateConfigValue_LeavesEveryOtherLineUntouched_FEA0005) {
+    test::TempDir dir;
+    auto path = dir.Path() / L"mycommander.ini";
+    EnsureConfigFileExistsAt(path);
+    auto before = LoadConfigFrom(path);
+
+    mc::UpdateConfigValue(path, L"colorTheme", L"highcontrast");
+
+    auto after = LoadConfigFrom(path);
+    CHECK(after.config.confirmRecycleBinDelete == before.config.confirmRecycleBinDelete);
+    CHECK(after.config.enterFileAction == before.config.enterFileAction);
+    CHECK(after.config.logLevel == before.config.logLevel);
+    CHECK(after.presentKeys.size() == before.presentKeys.size());
+}
+
+TEST_CASE(UpdateConfigValue_KeyNotPresentAtAll_AppendsAPlainLine_FEA0005) {
+    test::TempDir dir;
+    auto path = dir.Path() / L"mycommander.ini";
+    test::WriteFileContent(path, "confirmRecycleBinDelete = false\n");
+
+    bool ok = mc::UpdateConfigValue(path, L"colorTheme", L"highcontrast");
+
+    CHECK(ok);
+    auto after = LoadConfigFrom(path);
+    CHECK(after.config.colorTheme == ColorTheme::HighContrast);
+    CHECK(!after.config.confirmRecycleBinDelete);  // the pre-existing line survives untouched
+}
+
+TEST_CASE(UpdateConfigValue_EmptyPathIsANoOp_FEA0005) {
+    CHECK(!mc::UpdateConfigValue(std::filesystem::path{}, L"colorTheme", L"highcontrast"));
+}
+
+TEST_CASE(UpdateConfigValue_RoundTripTwice_LeavesOnlyTheFinalValue_FEA0005) {
+    test::TempDir dir;
+    auto path = dir.Path() / L"mycommander.ini";
+    EnsureConfigFileExistsAt(path);
+
+    mc::UpdateConfigValue(path, L"colorTheme", L"highcontrast");
+    mc::UpdateConfigValue(path, L"colorTheme", L"default");
+
+    auto after = LoadConfigFrom(path);
+    CHECK(after.config.colorTheme == ColorTheme::Default);
+    CHECK(after.presentKeys.count(L"colortheme") == 1);  // not duplicated into a second line
+}
+
+TEST_CASE(LoadConfigFrom_DiffProgram_SRC008) {
+    test::TempDir dir;
+    auto path = dir.Path() / L"mycommander.ini";
+    test::WriteFileContent(path, "diffProgram = \"C:\\Tools\\WinMergeU.exe\" \"%1\" \"%2\"\n");
+    auto result = LoadConfigFrom(path);
+    CHECK(result.warnings.empty());
+    CHECK(result.config.diffProgram == L"\"C:\\Tools\\WinMergeU.exe\" \"%1\" \"%2\"");
+    CHECK(LoadConfigFrom(dir.Path() / L"missing.ini").config.diffProgram.empty());  // default: built-in viewer
 }

@@ -4,6 +4,7 @@
 #include "Strings.h"
 
 #include <algorithm>
+#include <numeric>
 
 namespace fs = std::filesystem;
 
@@ -145,17 +146,34 @@ void Panel::Refresh() {
     }
 
     SortEntries();
+    PlaceCursorOn(previousCursorName);
+}
 
+// IS-0019: puts the cursor on `name` (exact spelling preferred, else a
+// case-insensitive match -- NTFS names are case-insensitive, and a typed or
+// derived name may differ in case), or on the first entry; then scrolls the
+// view so the cursor is visible, centering it when it was below the view.
+void Panel::PlaceCursorOn(const std::wstring& name) {
     cursor_ = 0;
-    if (!previousCursorName.empty()) {
-        auto found = std::find_if(entries_.begin(), entries_.end(),
-                                   [&](const Entry& e) { return e.name == previousCursorName; });
-        if (found != entries_.end()) {
-            cursor_ = static_cast<int>(std::distance(entries_.begin(), found));
+    if (!name.empty()) {
+        int caseInsensitive = -1;
+        for (int i = 0; i < static_cast<int>(entries_.size()); ++i) {
+            const std::wstring& n = entries_[i].name;
+            if (n == name) {
+                caseInsensitive = i;
+                break;
+            }
+            if (caseInsensitive < 0 && CompareStringOrdinal(n.c_str(), static_cast<int>(n.size()), name.c_str(),
+                                                            static_cast<int>(name.size()), TRUE) == CSTR_EQUAL) {
+                caseInsensitive = i;
+            }
         }
+        if (caseInsensitive >= 0) cursor_ = caseInsensitive;
     }
-    topIndex_ = std::min(topIndex_, cursor_);
-    topIndex_ = std::max(topIndex_, 0);
+    topIndex_ = std::max(0, std::min(topIndex_, cursor_));
+    if (lastVisibleRows_ > 0 && cursor_ >= topIndex_ + lastVisibleRows_) {
+        topIndex_ = std::max(0, cursor_ - lastVisibleRows_ / 2);
+    }
 }
 
 void Panel::BeginRefresh() {
@@ -230,14 +248,7 @@ void Panel::FinishRefresh() {
     refreshIterator_.reset();
     loading_ = false;
     SortEntries();
-    cursor_ = 0;
-    if (!refreshCursorName_.empty()) {
-        auto found = std::find_if(entries_.begin(), entries_.end(),
-                                  [&](const Entry& e) { return e.name == refreshCursorName_; });
-        if (found != entries_.end()) cursor_ = static_cast<int>(std::distance(entries_.begin(), found));
-    }
-    topIndex_ = std::min(topIndex_, cursor_);
-    topIndex_ = std::max(topIndex_, 0);
+    PlaceCursorOn(refreshCursorName_);
     refreshCursorName_.clear();
 }
 
@@ -275,6 +286,7 @@ void Panel::SetSort(SortKey key, bool descending) {
 }
 
 void Panel::ClampCursor(int visibleRows) {
+    if (visibleRows > 0) lastVisibleRows_ = visibleRows;  // IS-0019
     if (entries_.empty()) {
         cursor_ = 0;
         topIndex_ = 0;
@@ -289,6 +301,35 @@ void Panel::ClampCursor(int visibleRows) {
 void Panel::MoveCursor(int delta, int visibleRows) {
     cursor_ += delta;
     ClampCursor(visibleRows);
+}
+
+// IS-0015 (corrected): the first version of this used a remembered anchor
+// and re-selected the [anchor, cursor] range on every call. That design has
+// a permanent bug: the anchor entry (wherever the gesture started) is always
+// one of the range's own endpoints, so it's included in *every* non-empty
+// range for the gesture's whole lifetime -- there is no sequence of further
+// Shift+Up/Down presses that ever deselects it again, in either direction.
+// Reported by the user as "last item never deselected even up or down."
+//
+// Replaced with a plain, symmetric toggle instead -- no anchor, no
+// persistent state at all. Down toggles the entry being left, then moves
+// (exactly Insert's own existing ToggleCursorSelection); Up moves first,
+// then toggles the entry just arrived at. This pairing is what makes the
+// gesture fully reversible: moving forward then immediately back over the
+// same entries toggles each one exactly twice (a net no-op), so shrinking
+// a selection all the way back always clears every entry it covered,
+// including the one the gesture started on.
+void Panel::ToggleSelectionAndMove(int delta, int visibleRows) {
+    if (delta > 0) {
+        ToggleCursorSelection(visibleRows);  // toggle current, then move -- unchanged existing behavior
+        return;
+    }
+    if (delta < 0) {
+        MoveCursor(delta, visibleRows);
+        if (entries_.empty()) return;
+        Entry& entry = entries_[cursor_];
+        if (entry.name != L"..") entry.selected = !entry.selected;
+    }
 }
 
 void Panel::EnterSelected() {
@@ -394,11 +435,8 @@ int Panel::SelectedCount() const {
 }
 
 uint64_t Panel::SelectedSizeBytes() const {
-    uint64_t total = 0;
-    for (const auto& entry : entries_) {
-        if (entry.selected) total += entry.sizeBytes;
-    }
-    return total;
+    return std::accumulate(entries_.begin(), entries_.end(), uint64_t{0},
+                           [](uint64_t sum, const Entry& entry) { return entry.selected ? sum + entry.sizeBytes : sum; });
 }
 
 void Panel::SetFilter(std::wstring pattern) {
@@ -418,10 +456,15 @@ void Panel::SetLocation(const fs::path& dir, const std::wstring& selectName) {
     // find nothing. BeginRefresh()/Refresh()'s synchronous branch pick this
     // up and FinishRefresh() (or Refresh() itself, synchronously) applies
     // it once the listing is actually ready.
-    pendingSelectName_ = selectName;
+    // IS-0019: with no explicit name, moving to an ancestor (Backspace, Enter
+    // on "..", Back, a typed parent path, the hotlist) selects the folder the
+    // panel just came out of -- computed before path_ changes.
+    pendingSelectName_ = selectName.empty() ? ChildNameToward(dir, path_) : selectName;
     path_ = dir;
     Refresh();
 }
+
+void Panel::PreviewLocation(const fs::path& dir) { SetLocation(dir, L""); }
 
 void Panel::NavigateTo(const fs::path& dir, const std::wstring& selectName) {
     // NAV-009: this central guard covers navigation initiated by search

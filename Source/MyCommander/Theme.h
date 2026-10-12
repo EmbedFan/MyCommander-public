@@ -38,6 +38,9 @@
 #endif
 #include <windows.h>
 
+#include <functional>
+#include <vector>
+
 // UI-010: every theme-dependent color bundled as one unit, so a theme can
 // be defined, selected, and audited (ColorContrastTests.cpp) as a whole
 // rather than as scattered independent constants.
@@ -56,6 +59,19 @@ struct ThemePalette {
     WORD attrBody;
     WORD attrSection;
     WORD attrKey;
+    // IS-0016: the one cell a single-line editor's cursor sits on (text
+    // prompts, form Text fields, the command line). Deliberately its own
+    // field rather than a reused one -- the cursor used to borrow
+    // attrHeaderActive, which equals attrBody, so on every dialog's blue
+    // body the cursor was drawn invisibly.
+    WORD attrCursor;
+    // SRC-008: the difference viewer's removed / added / changed lines and
+    // the changed characters inside a changed line. The viewer's marker
+    // column ('<', '>', '~') carries the same meaning without colour.
+    WORD attrDiffRemoved;
+    WORD attrDiffAdded;
+    WORD attrDiffChanged;
+    WORD attrDiffHighlight;
 };
 
 // The original, always-default palette (unchanged from ACC-002's fixes).
@@ -78,6 +94,11 @@ constexpr ThemePalette kDefaultThemePalette = {
         FOREGROUND_INTENSITY,  // white on dark blue, ~16.0:1
     /* attrSection       */ FOREGROUND_GREEN | FOREGROUND_INTENSITY,  // bright green on black, ~15.3:1
     /* attrKey           */ FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_INTENSITY,  // bright yellow on black, ~19.6:1
+    /* attrCursor        */ BACKGROUND_RED | BACKGROUND_GREEN | BACKGROUND_BLUE | BACKGROUND_INTENSITY,  // black on white (inverse video), ~21:1
+    /* attrDiffRemoved   */ FOREGROUND_RED | FOREGROUND_INTENSITY,  // bright red on black, ~5.3:1 (plus the '<' marker)
+    /* attrDiffAdded     */ FOREGROUND_GREEN | FOREGROUND_INTENSITY,  // bright green on black, ~15.3:1 (plus '>')
+    /* attrDiffChanged   */ FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_INTENSITY,  // bright yellow on black, ~19.6:1 (plus '~')
+    /* attrDiffHighlight */ BACKGROUND_RED | BACKGROUND_GREEN | BACKGROUND_INTENSITY,  // black on bright yellow, ~19.6:1
 };
 
 // UI-010: a high-contrast palette. Everywhere the default palette settled
@@ -113,6 +134,11 @@ constexpr ThemePalette kHighContrastThemePalette = {
         FOREGROUND_INTENSITY,  // unchanged, already ~16.0:1
     /* attrSection       */ FOREGROUND_GREEN | FOREGROUND_INTENSITY,  // unchanged, already ~15.3:1
     /* attrKey           */ FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_INTENSITY,  // unchanged, already ~19.6:1
+    /* attrCursor        */ BACKGROUND_RED | BACKGROUND_GREEN | BACKGROUND_BLUE | BACKGROUND_INTENSITY,  // unchanged, already ~21:1
+    /* attrDiffRemoved   */ FOREGROUND_RED | FOREGROUND_INTENSITY,  // bright red on black, ~5.3:1 (plus the '<' marker)
+    /* attrDiffAdded     */ FOREGROUND_GREEN | FOREGROUND_INTENSITY,  // bright green on black, ~15.3:1 (plus '>')
+    /* attrDiffChanged   */ FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_INTENSITY,  // bright yellow on black, ~19.6:1 (plus '~')
+    /* attrDiffHighlight */ BACKGROUND_RED | BACKGROUND_GREEN | BACKGROUND_INTENSITY,  // black on bright yellow, ~19.6:1
 };
 
 // The live, currently-selected colors — see this file's own top comment
@@ -133,6 +159,11 @@ inline WORD kAttrTitle = kDefaultThemePalette.attrTitle;
 inline WORD kAttrBody = kDefaultThemePalette.attrBody;
 inline WORD kAttrSection = kDefaultThemePalette.attrSection;
 inline WORD kAttrKey = kDefaultThemePalette.attrKey;
+inline WORD kAttrCursor = kDefaultThemePalette.attrCursor;
+inline WORD kAttrDiffRemoved = kDefaultThemePalette.attrDiffRemoved;
+inline WORD kAttrDiffAdded = kDefaultThemePalette.attrDiffAdded;
+inline WORD kAttrDiffChanged = kDefaultThemePalette.attrDiffChanged;
+inline WORD kAttrDiffHighlight = kDefaultThemePalette.attrDiffHighlight;
 
 // Mask of just the three foreground color bits (no intensity, no
 // background) — used to recolor a row for the cursor highlight while
@@ -142,9 +173,36 @@ inline WORD kAttrKey = kDefaultThemePalette.attrKey;
 // constant regardless of theme.
 constexpr WORD kColorMask = FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_BLUE;
 
+// FEA-0002 Phase 1, §11: listeners notified every time ApplyThemePalette
+// runs while at least one is registered -- in practice, every call
+// *after* wmain's own startup call (which runs before PluginManager, and
+// so before any plugin's OnThemeChanged could possibly be registered,
+// even exists — a plugin queries the *current* theme via
+// McPluginHost::GetTheme during its own Init instead). PluginManager
+// registers one lambda here (main.cpp wires it up once, right after
+// PluginManager exists) forwarding to PluginManager::NotifyThemeChanged,
+// which fans it out to every loaded plugin's own optional
+// OnThemeChanged export. Deliberately a std::function list, not a
+// dependency on PluginManager/the MC Plugin ABI types directly -- Theme.h
+// stays exactly as decoupled from the plugin subsystem as every other
+// file that doesn't need to know it exists.
+inline std::vector<std::function<void(const ThemePalette&)>>& ThemeChangeListeners() {
+    static std::vector<std::function<void(const ThemePalette&)>> listeners;
+    return listeners;
+}
+
+inline void RegisterThemeChangeListener(std::function<void(const ThemePalette&)> listener) {
+    ThemeChangeListeners().push_back(std::move(listener));
+}
+
 // UI-010: overwrites every live kAttr* global above with `palette`'s
-// values — called exactly once, from wmain right after Config loads
-// (main.cpp), before the input loop starts.
+// values — called once at startup (from wmain right after Config loads,
+// main.cpp, before the input loop starts) and again on every IS-0006 live
+// config reload. FEA-0002 Phase 1: also notifies every registered
+// ThemeChangeListeners() entry, in registration order, after the globals
+// are updated -- so a listener always sees the new values already live if
+// it turns around and reads kAttrNormal etc. itself instead of only using
+// the palette it was handed.
 inline void ApplyThemePalette(const ThemePalette& palette) {
     kAttrNormal = palette.attrNormal;
     kAttrDir = palette.attrDir;
@@ -161,4 +219,10 @@ inline void ApplyThemePalette(const ThemePalette& palette) {
     kAttrBody = palette.attrBody;
     kAttrSection = palette.attrSection;
     kAttrKey = palette.attrKey;
+    kAttrCursor = palette.attrCursor;
+    kAttrDiffRemoved = palette.attrDiffRemoved;
+    kAttrDiffAdded = palette.attrDiffAdded;
+    kAttrDiffChanged = palette.attrDiffChanged;
+    kAttrDiffHighlight = palette.attrDiffHighlight;
+    for (const auto& listener : ThemeChangeListeners()) listener(palette);
 }

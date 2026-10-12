@@ -135,3 +135,92 @@ TEST_CASE(SearchFiles_DoesNotDescendIntoReparsePointButReportsItIfMatching) {
     CHECK(ContainsName(outcome.results, L"searchlink"));
     CHECK(!ContainsName(outcome.results, L"secret.txt"));
 }
+
+// --- Content search (SRC-004/005) -----------------------------------------------------
+
+namespace {
+mc::SearchOptions ContentOptions(const std::wstring& mask, const std::wstring& text, bool regex = false) {
+    mc::SearchOptions options;
+    options.nameMask = mask;
+    std::wstring error;
+    options.content = mc::ContentMatcher::Create(mc::ContentQuery{text, regex, false}, error);
+    return options;
+}
+}  // namespace
+
+TEST_CASE(SearchFiles_Content_FirstMatchingLineAndNoFolders_SRC004) {
+    test::TempDir root;
+    fs::create_directories(root.Path() / L"sub" / L"todo-folder");
+    test::WriteFileContent(root.Path() / L"a.txt", "first\n  // TODO one\nTODO two\n");
+    test::WriteFileContent(root.Path() / L"sub" / L"b.txt", "nothing here\n");
+    test::WriteFileContent(root.Path() / L"sub" / L"c.txt", "x\ny\nfix: todo later\n");
+    SearchOutcome out = SearchFiles(root.Path(), ContentOptions(L"*", L"todo"));
+    CHECK(out.results.size() == 2);
+    for (const auto& r : out.results) {
+        CHECK(!r.isDirectory);  // "todo-folder" matches the name but isn't a file
+        if (r.fullPath.filename() == L"a.txt") CHECK(r.lineNumber == 2 && r.lineText == L"  // TODO one");
+        if (r.fullPath.filename() == L"c.txt") CHECK(r.lineNumber == 3);
+    }
+    CHECK(out.filesSearched == 3);
+}
+
+TEST_CASE(SearchFiles_Content_MaskAndRegexCombine_SRC005) {
+    test::TempDir root;
+    test::WriteFileContent(root.Path() / L"keep.txt", "version 2026-10\n");
+    test::WriteFileContent(root.Path() / L"skip.log", "version 2026-10\n");
+    SearchOutcome out = SearchFiles(root.Path(), ContentOptions(L"*.txt", L"\\d{4}-\\d{2}", true));
+    CHECK(out.results.size() == 1 && ContainsName(out.results, L"keep.txt"));
+}
+
+TEST_CASE(SearchFiles_Content_BinarySkippedByDefault_SearchedWhenAsked_SRC004) {
+    test::TempDir root;
+    test::WriteFileContent(root.Path() / L"tool.exe", std::string("MZ\0\0 secret marker \0", 21));
+    SearchOutcome skipped = SearchFiles(root.Path(), ContentOptions(L"*", L"marker"));
+    CHECK(skipped.results.empty());
+    CHECK(skipped.binarySkipped == 1);
+    mc::SearchOptions all = ContentOptions(L"*", L"marker");
+    all.skipBinary = false;
+    all.encoding = mc::TextEncodingChoice::Ansi;
+    SearchOutcome found = SearchFiles(root.Path(), all);
+    CHECK(found.results.size() == 1);
+}
+
+TEST_CASE(SearchFiles_Content_Utf16FileIsNotBinary_SRC005) {
+    test::TempDir root;
+    test::WriteFileContent(root.Path() / L"wide.txt", std::string("\xFF\xFEh\0i\0", 6));
+    SearchOutcome out = SearchFiles(root.Path(), ContentOptions(L"*", L"hi"));
+    CHECK(out.results.size() == 1);
+}
+
+TEST_CASE(SearchFiles_Content_LockedFileCountedAsUnreadable_SRC004) {
+    test::TempDir root;
+    test::WriteFileContent(root.Path() / L"locked.txt", "needle\n");
+    test::WriteFileContent(root.Path() / L"open.txt", "needle\n");
+    HANDLE lock = CreateFileW((root.Path() / L"locked.txt").c_str(), GENERIC_READ, 0, nullptr, OPEN_EXISTING,
+                              FILE_ATTRIBUTE_NORMAL, nullptr);
+    CHECK(lock != INVALID_HANDLE_VALUE);
+    SearchOutcome out = SearchFiles(root.Path(), ContentOptions(L"*", L"needle"));
+    CloseHandle(lock);
+    CHECK(out.results.size() == 1 && ContainsName(out.results, L"open.txt"));
+    CHECK(out.unreadable == 1);
+}
+
+TEST_CASE(SearchFiles_Content_CancelStopsInsideTheWalk_SRC004) {
+    test::TempDir root;
+    for (int i = 0; i < 5; ++i)
+        test::WriteFileContent(root.Path() / (L"f" + std::to_wstring(i) + L".txt"), "needle\n");
+    int polls = 0;
+    SearchOutcome out = SearchFiles(root.Path(), ContentOptions(L"*", L"needle", true), [&]() { return ++polls > 2; });
+    CHECK(out.cancelled);
+    CHECK(out.results.size() < 5);
+}
+
+TEST_CASE(SearchFiles_Content_ProgressReportsEachFile_SRC004) {
+    test::TempDir root;
+    test::WriteFileContent(root.Path() / L"a.txt", "x\n");
+    test::WriteFileContent(root.Path() / L"b.txt", "y\n");
+    std::vector<std::wstring> seen;
+    SearchFiles(root.Path(), ContentOptions(L"*", L"z"), {},
+                [&](size_t, const fs::path& current) { seen.push_back(current.filename().wstring()); });
+    CHECK(seen.size() == 2);
+}

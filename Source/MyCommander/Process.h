@@ -55,4 +55,13 @@ struct DetachedProcessResult {
 DetachedProcessResult RunDetached(const std::wstring& exePath, const std::vector<std::wstring>& args,
                                   const std::filesystem::path& workingDirectory);
 
+// FEA-0009: like RunDetached, but `rawArguments` is appended verbatim after
+// the (quoted) program path instead of being quoted per argument -- a file
+// action's argument template is already written, and quoted, by the user
+// (`-ro "%f"`), so quoting it again would break it. Placeholder expansion is
+// still safe: a Windows path can never contain '"', so a path substituted
+// inside the user's own quotes can't escape them (SEC-004).
+DetachedProcessResult RunDetachedCommandLine(const std::wstring& exePath, const std::wstring& rawArguments,
+                                             const std::filesystem::path& workingDirectory);
+
 } // namespace mc

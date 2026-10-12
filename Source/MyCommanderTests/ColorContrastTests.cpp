@@ -78,6 +78,11 @@ std::vector<NamedAttr> PaletteEntries(const ThemePalette& p) {
         {L"attrBody", p.attrBody},
         {L"attrSection", p.attrSection},
         {L"attrKey", p.attrKey},
+        {L"attrCursor", p.attrCursor},
+        {L"attrDiffRemoved", p.attrDiffRemoved},
+        {L"attrDiffAdded", p.attrDiffAdded},
+        {L"attrDiffChanged", p.attrDiffChanged},
+        {L"attrDiffHighlight", p.attrDiffHighlight},
     };
 }
 
@@ -146,6 +151,21 @@ TEST_CASE(HighContrastTheme_ImprovedFields_AreSubstantiallyHigherThanDefault_UI0
 // one gap that table alone can't see (attrBroken + BACKGROUND_BLUE,
 // ~4.0:1 for the default theme's red — fixed in main.cpp by special-casing
 // that one combination to attrBrokenBanner instead, for every theme).
+// IS-0016: the line-editor cursor used to be drawn with attrHeaderActive,
+// whose background equals attrBody's -- invisible on every dialog. Guard
+// that the cursor's own background differs from the backgrounds of every
+// surface a line editor is drawn on: a dialog's body (text prompt), its
+// focused-row highlight (form Text field), and the command line.
+TEST_CASE(CursorAttr_BackgroundDiffersFromEveryLineEditorSurface_IS0016) {
+    constexpr WORD kBackgroundMask = BACKGROUND_RED | BACKGROUND_GREEN | BACKGROUND_BLUE | BACKGROUND_INTENSITY;
+    for (const auto& theme : kAllThemes) {
+        WORD cursorBg = theme.palette.attrCursor & kBackgroundMask;
+        CHECK(cursorBg != (theme.palette.attrBody & kBackgroundMask));
+        CHECK(cursorBg != (theme.palette.attrSelected & kBackgroundMask));
+        CHECK(cursorBg != (theme.palette.attrCommandLine & kBackgroundMask));
+    }
+}
+
 TEST_CASE(CursorRowHighlight_EveryColorMaskedOntoBackgroundBlue_MeetsWcagAa_ACC002_UI010) {
     for (const auto& theme : kAllThemes) {
         WORD colorsSeenAtCursorRow[] = {theme.palette.attrNormal, theme.palette.attrDir, theme.palette.attrSelected};

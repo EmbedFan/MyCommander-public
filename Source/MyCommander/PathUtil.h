@@ -12,6 +12,7 @@
 #include <optional>
 #include <string>
 #include <system_error>
+#include <vector>
 
 namespace mc {
 
@@ -83,6 +84,32 @@ inline bool IsFilesystemRoot(const std::filesystem::path& p) {
     return p == shareRoot;
 }
 
+// IS-0019: the first path component of `current` below `ancestor` -- e.g.
+// "Projects" for C:\Work and C:\Work\Projects\App -- or empty when `current`
+// isn't strictly inside `ancestor`. Purely lexical (no filesystem access, so
+// an offline share can't block it), case-insensitive, and indifferent to a
+// trailing separator; works for drive roots and UNC share roots alike. Used
+// to put the cursor on the folder just left when moving up.
+inline std::wstring ChildNameToward(const std::filesystem::path& ancestor, const std::filesystem::path& current) {
+    auto parts = [](const std::filesystem::path& p) {
+        std::vector<std::wstring> out;
+        for (const auto& part : p.lexically_normal()) {
+            if (!part.native().empty()) out.push_back(part.native());
+        }
+        return out;
+    };
+    std::vector<std::wstring> a = parts(ancestor);
+    std::vector<std::wstring> c = parts(current);
+    if (a.empty() || c.size() <= a.size()) return L"";
+    for (size_t i = 0; i < a.size(); ++i) {
+        if (CompareStringOrdinal(a[i].c_str(), static_cast<int>(a[i].size()), c[i].c_str(),
+                                 static_cast<int>(c[i].size()), TRUE) != CSTR_EQUAL) {
+            return L"";
+        }
+    }
+    return c[a.size()];
+}
+
 // True if `candidate` is the same path as `base`, or nested inside it.
 // Used to refuse copying/moving a directory into its own subtree (SEC-005).
 inline bool IsSameOrWithin(const std::filesystem::path& base, const std::filesystem::path& candidate) {
@@ -110,6 +137,18 @@ inline bool IsSameOrWithin(const std::filesystem::path& base, const std::filesys
            candStr[baseStr.size()] == L'\\';
 }
 
+// IS-0015/NAV-012: whether `a` and `b` name the same filesystem entry (same
+// volume + file ID) -- unlike std::filesystem::path's own operator==, this is
+// case-insensitive and separator-agnostic on Windows, the comparison "are the
+// two panels showing the same directory" actually needs. False (not just
+// non-equivalent) on any error, e.g. a path that doesn't currently exist --
+// matching FileOps.cpp's own existing fs::equivalent usage for the same
+// reason (a sameDirectory check there also just means "false" on failure).
+inline bool PathsEquivalent(const std::filesystem::path& a, const std::filesystem::path& b) {
+    std::error_code ec;
+    return std::filesystem::equivalent(a, b, ec) && !ec;
+}
+
 // NAV-003: resolves what a user typed or pasted into the command line to an
 // existing directory, or nullopt if it isn't one. Trims surrounding
 // whitespace and a matching pair of quotes (the shape a path takes when
@@ -119,15 +158,27 @@ inline bool IsSameOrWithin(const std::filesystem::path& base, const std::filesys
 // prefix, which (unlike a plain Win32 path) cannot resolve those itself.
 // Lets the command line tell "go to this path" apart from "run this as a
 // shell command" for the same typed line.
-inline std::optional<std::filesystem::path> ResolveExistingDirectory(const std::filesystem::path& basePath,
-                                                                      const std::wstring& typed) {
+namespace detail {
+
+// Trims surrounding whitespace and one matching pair of surrounding quotes
+// from a typed/pasted path — shared by ResolveExistingDirectory and
+// ResolveCopyAsTarget below.
+inline std::wstring TrimTypedPath(const std::wstring& typed) {
     size_t start = typed.find_first_not_of(L" \t");
-    if (start == std::wstring::npos) return std::nullopt;
+    if (start == std::wstring::npos) return L"";
     size_t end = typed.find_last_not_of(L" \t");
     std::wstring trimmed = typed.substr(start, end - start + 1);
     if (trimmed.size() >= 2 && trimmed.front() == L'"' && trimmed.back() == L'"') {
         trimmed = trimmed.substr(1, trimmed.size() - 2);
     }
+    return trimmed;
+}
+
+}  // namespace detail
+
+inline std::optional<std::filesystem::path> ResolveExistingDirectory(const std::filesystem::path& basePath,
+                                                                      const std::wstring& typed) {
+    std::wstring trimmed = detail::TrimTypedPath(typed);
     if (trimmed.empty()) return std::nullopt;
 
     std::filesystem::path candidate(trimmed);
@@ -139,6 +190,43 @@ inline std::optional<std::filesystem::path> ResolveExistingDirectory(const std::
 
     if (!std::filesystem::is_directory(ToLongPath(resolved), ec) || ec) return std::nullopt;
     return resolved;
+}
+
+// Shift+F5 ("copy as", FOP-019): turns what the user typed into the full
+// target path for a copy of `sourceName` (an entry of `sourceDir`), or
+// nullopt for empty input. Trims whitespace/quotes like
+// ResolveExistingDirectory. A bare name or relative path is resolved
+// against `sourceDir` — the copy lands next to the original, under the
+// typed name, never in a new directory of that name. A full path is used
+// as given. Either way, if the result is an existing directory (other than
+// the source itself) or the input ends in a path separator, the copy goes
+// *inside* it, keeping `sourceName`. "."/".." segments are normalized.
+inline std::optional<std::filesystem::path> ResolveCopyAsTarget(const std::filesystem::path& sourceDir,
+                                                                 const std::wstring& sourceName,
+                                                                 const std::wstring& typed) {
+    std::wstring trimmed = detail::TrimTypedPath(typed);
+    bool intoDirectory = false;
+    while (!trimmed.empty() && (trimmed.back() == L'\\' || trimmed.back() == L'/')) {
+        // Keep a drive root's own separator ("D:\") — it's the directory itself.
+        if (trimmed.size() == 3 && trimmed[1] == L':') break;
+        trimmed.pop_back();
+        intoDirectory = true;
+    }
+    if (trimmed.empty()) return std::nullopt;
+    if (trimmed.size() == 3 && trimmed[1] == L':') intoDirectory = true;
+
+    std::filesystem::path candidate(trimmed);
+    if (!candidate.is_absolute()) candidate = sourceDir / candidate;
+
+    std::error_code ec;
+    std::filesystem::path resolved = std::filesystem::weakly_canonical(candidate, ec);
+    if (ec) resolved = candidate;
+
+    if (!intoDirectory) {
+        bool isDir = std::filesystem::is_directory(ToLongPath(resolved), ec) && !ec;
+        intoDirectory = isDir && !PathsEquivalent(resolved, sourceDir / sourceName);
+    }
+    return intoDirectory ? resolved / sourceName : resolved;
 }
 
 namespace detail {

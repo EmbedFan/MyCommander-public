@@ -42,6 +42,7 @@ EnterFileAction ParseEnterFileAction(const std::wstring& value, bool& ok) {
     if (lower == L"view") return EnterFileAction::View;
     if (lower == L"edit") return EnterFileAction::Edit;
     if (lower == L"execute") return EnterFileAction::Execute;
+    if (lower == L"open") return EnterFileAction::Open;
     ok = false;
     return EnterFileAction::View;
 }
@@ -112,6 +113,29 @@ ColorTheme ParseColorTheme(const std::wstring& value, bool& ok) {
     return ColorTheme::Default;
 }
 
+// FEA-0002: parses a comma-separated, unordered list of plugin ids —
+// arbitrary strings (no fixed vocabulary to validate against, unlike
+// ParseColumnList's four known names), so this never fails: an empty value
+// is a legitimate "nothing disabled" and every non-empty token is accepted
+// verbatim, whitespace-trimmed, exactly as PluginManager compares it
+// against each loaded plugin's own McPluginMetadata::id.
+std::vector<std::wstring> ParseStringList(const std::wstring& value) {
+    std::vector<std::wstring> result;
+    std::wstring trimmedValue = Trim(value);
+    if (trimmedValue.empty()) return result;
+
+    size_t start = 0;
+    while (start <= trimmedValue.size()) {
+        size_t comma = trimmedValue.find(L',', start);
+        size_t tokenLen = (comma == std::wstring::npos) ? std::wstring::npos : comma - start;
+        std::wstring token = Trim(trimmedValue.substr(start, tokenLen));
+        if (!token.empty()) result.push_back(token);
+        if (comma == std::wstring::npos) break;
+        start = comma + 1;
+    }
+    return result;
+}
+
 // IS-0006: one recognized key plus the exact comment-plus-"key = default"
 // text block that setting gets in a brand new config file.
 struct ConfigKeyBlock {
@@ -149,13 +173,16 @@ const std::vector<ConfigKeyBlock>& ConfigKeyBlocks() {
          L"# What pressing Enter on a file does (VEE-002). F3/F4 always mean\n"
          L"# View/Edit regardless of this setting; this only controls the plain\n"
          L"# Enter key's default action.\n"
-         L"#   view    - open it in the built-in viewer (default)\n"
+         L"#   view    - its default \"view\" action from file-actions.conf, or the\n"
+         L"#             built-in viewer if none is registered (default)\n"
          L"#   edit    - open it in the external editor (%EDITOR%, or notepad.exe)\n"
+         L"#   open    - its default \"open\" action from file-actions.conf, or its\n"
+         L"#             Windows file association if none is registered (FEA-0009)\n"
          L"#   execute - run/open it with its own Windows file association, the\n"
          L"#             same as double-clicking it in Explorer (VEE-008: only ever\n"
          L"#             happens because you explicitly pressed Enter after choosing\n"
          L"#             this setting -- never automatically)\n"
-         L"# Values: view / edit / execute (default: view)\n"
+         L"# Values: view / edit / open / execute (default: view)\n"
          L"enterFileAction = view\n"},
         {L"groupdirectoriesfirst",
          L"# Keep directories before files for every sort key (LIST-004). Set false to\n"
@@ -229,6 +256,22 @@ const std::vector<ConfigKeyBlock>& ConfigKeyBlocks() {
          L"# non-blocking mode does not hand off to cleanly.\n"
          L"# Values: true / false (default: false)\n"
          L"waitForEditorToClose = false\n"},
+        {L"disabledpluginids",
+         L"# FEA-0002: MC Plugin ids to identify but never activate (Source/\n"
+         L"# MyCommanderPluginSdk\\DEVELOPER_GUIDE.md) -- each plugin's own\n"
+         L"# McPluginMetadata::id, comma-separated. A disabled plugin's DLL is still\n"
+         L"# found and logged, just never loaded past that point -- use this to turn\n"
+         L"# off a problematic plugin without deleting or moving its file.\n"
+         L"# Values: a comma-separated list of plugin ids, or empty (default: empty)\n"
+         L"disabledPluginIds = \n"},
+        {L"diffprogram",
+         L"# SRC-008: an external program for File > Compare contents (Alt+F3) instead\n"
+         L"# of the built-in difference viewer: the program, then its arguments, with\n"
+         L"# %1 / %2 replaced by the left / right file -- quote them yourself, e.g.\n"
+         L"#   diffProgram = \"C:\\Program Files\\WinMerge\\WinMergeU.exe\" \"%1\" \"%2\"\n"
+         L"# Shift+Alt+F3 always opens the built-in viewer.\n"
+         L"# Values: a command line, or empty (default: empty = built-in viewer)\n"
+         L"diffProgram = \n"},
     };
     return blocks;
 }
@@ -256,12 +299,27 @@ LoadConfigResult LoadConfigFrom(const std::filesystem::path& path) {
         std::wstring trimmed = Trim(line);
         if (trimmed.empty() || trimmed.front() == L'#' || trimmed.front() == L';') continue;
 
+        // FEA-0009: a file-actions block header or action line typed into
+        // this file (Ctrl+F11 opens it, so it's an easy mix-up) would
+        // otherwise be a generic syntax warning / a silently ignored key.
+        if (trimmed.front() == L'[') {
+            result.warnings.push_back(FormatConfigFileActionLineWarning(lineNumber, trimmed));
+            continue;
+        }
         size_t eq = trimmed.find(L'=');
         if (eq == std::wstring::npos) {
             result.warnings.push_back(FormatConfigLineSyntaxWarning(lineNumber, trimmed));
             continue;
         }
         std::wstring key = ToLower(Trim(trimmed.substr(0, eq)));
+        {
+            std::wstring bareKey = key;
+            if (!bareKey.empty() && bareKey.back() == L'*') bareKey = Trim(bareKey.substr(0, bareKey.size() - 1));
+            if (bareKey == L"view" || bareKey == L"open") {
+                result.warnings.push_back(FormatConfigFileActionLineWarning(lineNumber, trimmed));
+                continue;
+            }
+        }
         std::wstring value = Trim(trimmed.substr(eq + 1));
 
         bool ok = false;
@@ -273,7 +331,7 @@ LoadConfigResult LoadConfigFrom(const std::filesystem::path& path) {
             bool parsed = ParseBool(value, ok);
             if (ok) result.config.confirmPermanentDelete = parsed;
         } else if (key == L"enterfileaction") {
-            expected = L"view/edit/execute";
+            expected = L"view/edit/open/execute";
             EnterFileAction parsed = ParseEnterFileAction(value, ok);
             if (ok) result.config.enterFileAction = parsed;
         } else if (key == L"groupdirectoriesfirst") {
@@ -313,6 +371,12 @@ LoadConfigResult LoadConfigFrom(const std::filesystem::path& path) {
         } else if (key == L"waitforeditortoclose") {
             bool parsed = ParseBool(value, ok);
             if (ok) result.config.waitForEditorToClose = parsed;
+        } else if (key == L"disabledpluginids") {
+            ok = true;
+            result.config.disabledPluginIds = ParseStringList(value);
+        } else if (key == L"diffprogram") {
+            ok = true;
+            result.config.diffProgram = value;
         } else {
             continue;  // CFG-004: unrecognized key, ignored rather than blocking startup
         }
@@ -370,6 +434,35 @@ std::vector<std::wstring> AppendMissingConfigKeys(const std::filesystem::path& p
         if (presentKeys.find(block.key) == presentKeys.end()) out << L"\n" << block.text;
     }
     return missing;
+}
+
+bool UpdateConfigValue(const std::filesystem::path& path, const std::wstring& key, const std::wstring& newValue) {
+    if (path.empty()) return false;
+    std::wstring lowerKey = ToLower(key);
+
+    std::wifstream in(path);
+    if (!in) return false;
+    std::vector<std::wstring> lines;
+    std::wstring line;
+    bool found = false;
+    while (std::getline(in, line)) {
+        std::wstring trimmed = Trim(line);
+        if (!found && !trimmed.empty() && trimmed.front() != L'#' && trimmed.front() != L';') {
+            size_t eq = trimmed.find(L'=');
+            if (eq != std::wstring::npos && ToLower(Trim(trimmed.substr(0, eq))) == lowerKey) {
+                line = key + L" = " + newValue;
+                found = true;
+            }
+        }
+        lines.push_back(line);
+    }
+    in.close();
+    if (!found) lines.push_back(key + L" = " + newValue);
+
+    std::wofstream out(path);
+    if (!out) return false;
+    for (const auto& outLine : lines) out << outLine << L"\n";
+    return true;
 }
 
 }  // namespace mc

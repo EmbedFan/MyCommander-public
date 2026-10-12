@@ -55,3 +55,58 @@ Copy-Item -Path (Join-Path $repoRoot 'USERGUIDE.md') -Destination (Join-Path $pa
 Copy-Item -Path (Join-Path $repoRoot 'LICENSE') -Destination (Join-Path $payloadDir 'LICENSE') -Force
 
 Write-Host "Installer payload staged in $payloadDir"
+
+# IS-0013: also stage the ZIP plugin, the one real, user-facing ("implemented")
+# plugin today -- ExamplePlugin is deliberately excluded, it's a developer-
+# facing template, not a feature meant to ship to end users. Same freshness
+# discipline as MyCommander.exe above (always rebuilt, never whatever already
+# happens to sit in Build\), but a failed plugin rebuild is a warning, not a
+# script-terminating error -- the core app is fully usable with zero plugins
+# installed (true today for every user), so this must never block packaging
+# or installing it.
+$zipPluginProject = Join-Path $repoRoot 'Source\ZipPlugin\ZipPlugin.vcxproj'
+try {
+    & $msbuild $zipPluginProject /t:Rebuild /p:Configuration=Release /p:Platform=x64 /nologo /v:minimal
+    if ($LASTEXITCODE -ne 0) { throw "ZipPlugin rebuild failed (exit $LASTEXITCODE)" }
+
+    $zipPluginDll = Join-Path $repoRoot 'Source\ZipPlugin\Build\x64\Release\ZipPlugin.dll'
+    if (-not (Test-Path $zipPluginDll)) { throw "Expected rebuilt plugin not found at $zipPluginDll" }
+
+    Copy-Item -Path $zipPluginDll -Destination (Join-Path $payloadDir 'ZipPlugin.dll') -Force
+    Write-Host "ZIP plugin staged in $payloadDir"
+} catch {
+    Write-Warning "Could not stage the ZIP plugin for the installer: $_"
+    Write-Warning "Continuing without it -- the installer will still ship, just without the ZIP plugin."
+}
+
+# EXT-005 / FTP-012: the FTP plugin, staged exactly like the ZIP plugin above.
+$ftpPluginProject = Join-Path $repoRoot 'Source\FtpPlugin\FtpPlugin.vcxproj'
+try {
+    & $msbuild $ftpPluginProject /t:Rebuild /p:Configuration=Release /p:Platform=x64 /nologo /v:minimal
+    if ($LASTEXITCODE -ne 0) { throw "FtpPlugin rebuild failed (exit $LASTEXITCODE)" }
+
+    $ftpPluginDll = Join-Path $repoRoot 'Source\FtpPlugin\Build\x64\Release\FtpPlugin.dll'
+    if (-not (Test-Path $ftpPluginDll)) { throw "Expected rebuilt plugin not found at $ftpPluginDll" }
+
+    Copy-Item -Path $ftpPluginDll -Destination (Join-Path $payloadDir 'FtpPlugin.dll') -Force
+    Write-Host "FTP plugin staged in $payloadDir"
+} catch {
+    Write-Warning "Could not stage the FTP plugin for the installer: $_"
+    Write-Warning "Continuing without it -- the installer will still ship, just without the FTP plugin."
+}
+
+# EXT-004 / SFTP-010: the SFTP plugin (libssh2 compiled in), staged the same way.
+$sftpPluginProject = Join-Path $repoRoot 'Source\SftpPlugin\SftpPlugin.vcxproj'
+try {
+    & $msbuild $sftpPluginProject /t:Rebuild /p:Configuration=Release /p:Platform=x64 /nologo /v:minimal
+    if ($LASTEXITCODE -ne 0) { throw "SftpPlugin rebuild failed (exit $LASTEXITCODE)" }
+
+    $sftpPluginDll = Join-Path $repoRoot 'Source\SftpPlugin\Build\x64\Release\SftpPlugin.dll'
+    if (-not (Test-Path $sftpPluginDll)) { throw "Expected rebuilt plugin not found at $sftpPluginDll" }
+
+    Copy-Item -Path $sftpPluginDll -Destination (Join-Path $payloadDir 'SftpPlugin.dll') -Force
+    Write-Host "SFTP plugin staged in $payloadDir"
+} catch {
+    Write-Warning "Could not stage the SFTP plugin for the installer: $_"
+    Write-Warning "Continuing without it -- the installer will still ship, just without the SFTP plugin."
+}

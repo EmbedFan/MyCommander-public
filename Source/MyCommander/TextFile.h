@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -48,5 +49,33 @@ inline size_t LineCount(const TextFileIndex& index) { return index.lineStarts.si
 // file's many lines reuses one open handle instead of reopening it per line.
 // Returns an empty string for an out-of-range `lineNumber`.
 std::wstring ReadIndexedLine(std::ifstream& in, const TextFileIndex& index, size_t lineNumber);
+
+// SRC-005: how Find files decodes a file's content.
+//   Auto    -- a BOM decides (UTF-8 / UTF-16LE / UTF-16BE); without one, each
+//              line is UTF-8 if valid, else the system ANSI code page.
+//   Utf8    -- UTF-8 (invalid bytes become U+FFFD).
+//   Ansi    -- the system ANSI code page (CP_ACP).
+//   Utf16Le / Utf16Be -- 2-byte code units, little / big endian.
+// An explicit choice still skips that encoding's own BOM if the file has one.
+enum class TextEncodingChoice { Auto, Utf8, Ansi, Utf16Le, Utf16Be };
+
+// What ForEachTextLine reports at the start of a file, for binary
+// detection: the first few KB of raw bytes and whether a UTF-16 BOM was seen.
+struct TextFileProbe {
+    std::vector<unsigned char> head;
+    bool utf16Bom = false;
+};
+
+// SRC-004: one forward pass over `path` in fixed-size chunks -- bounded
+// memory whatever the file size (VEE-004 precedent) -- calling `onLine` with
+// each line's 1-based number and decoded text ('\r' stripped, tabs NOT
+// expanded). A line longer than 256 KB of raw bytes is cut there (the rest
+// is skipped up to its line break) so one huge line can't exhaust memory.
+// `onProbe`, if given, is called once before any line with the file's head;
+// returning false from it (e.g. "binary, skip") or from `onLine` stops
+// reading. Returns false only if the file can't be opened or read.
+bool ForEachTextLine(const std::filesystem::path& path, TextEncodingChoice encoding,
+                     const std::function<bool(size_t lineNumber, const std::wstring& line)>& onLine,
+                     const std::function<bool(const TextFileProbe&)>& onProbe = {});
 
 } // namespace mc

@@ -1,0 +1,34 @@
+// EXT-004: SftpPlugin.dll's embedded Windows file-version resource, from
+// Version.h (same pattern as FtpPlugin.rc / ZipPlugin.rc).
+
+#include <winres.h>
+#include "Version.h"
+
+VS_VERSION_INFO VERSIONINFO
+ FILEVERSION MCPLUGIN_VERSION_MAJOR,MCPLUGIN_VERSION_MINOR,MCPLUGIN_VERSION_PATCH,MCPLUGIN_VERSION_BUILD
+ PRODUCTVERSION MCPLUGIN_VERSION_MAJOR,MCPLUGIN_VERSION_MINOR,MCPLUGIN_VERSION_PATCH,MCPLUGIN_VERSION_BUILD
+ FILEFLAGSMASK VS_FFI_FILEFLAGSMASK
+ FILEFLAGS 0x0L
+ FILEOS VOS_NT_WINDOWS32
+ FILETYPE VFT_DLL
+ FILESUBTYPE VFT2_UNKNOWN
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904B0"
+        BEGIN
+            VALUE "CompanyName", "MyCommander project"
+            VALUE "FileDescription", "SFTP Plugin for MyCommander (includes libssh2, BSD-3-Clause)"
+            VALUE "FileVersion", MCPLUGIN_VERSION_STR
+            VALUE "InternalName", "SftpPlugin"
+            VALUE "LegalCopyright", "Copyright (C) Attila Gallai 1985 - 2026"
+            VALUE "OriginalFilename", "SftpPlugin.dll"
+            VALUE "ProductName", "SFTP Plugin"
+            VALUE "ProductVersion", MCPLUGIN_VERSION_STR
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END

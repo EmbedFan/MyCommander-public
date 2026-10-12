@@ -1,7 +1,7 @@
 # Terminal File Commander — Software Requirements Specification
 
 **Document status:** Initial planning draft  
-**Version:** 0.52 (2026-09-20: added an "Implemented" field to every requirement row —
+**Version:** 1.15.0 (2026-09-20: added an "Implemented" field to every requirement row —
 Implemented/Partial/Not Started/N/A, evaluated against `Source/MyCommander/` as of this date;
 0.6 marks SRC-001/002/003 Implemented after the quick-filter/recursive-search slice; 0.7 marks
 CLI-002/003/005/006 Implemented and CLI-004/007 Partial after the command-line/shell slice —
@@ -608,7 +608,695 @@ value construction) with 12 new `SetupLogicTests.cpp` cases; the OS-integration 
 matching `Elevation.h`'s own `RunElevated` precedent — verified instead via a real install/
 upgrade-detect/uninstall round trip on this machine, fully reversed by the same uninstall path
 this feature adds. See `AIPrompt/features/FEA-0006-plan.md` for the full design and status.
-**Primary platform:** Windows 10/11  
+1.0.0 (2026-09-25) Version set to 1.0.0 (`MC_VERSION_MAJOR`/`MINOR`/`PATCH`/`BUILD` = 1/0/0/0 at
+the moment it was set; `BUILD` auto-increments from there on every real build, per
+`Source/MyCommander/Version.h`'s own established convention). No requirement/behavior change —
+a deliberate version-number decision, not a code change beyond the four macros themselves.
+1.1.0 (2026-09-28) FEA-0005: added an always-visible top menu bar (`File Selection Commands
+Network View Settings`, `MENU-001`-`004`), opened via `Alt+<mnemonic>` and fully mouse-clickable
+— a new pure `MenuBar.h` module (structure, open/close/navigate state transitions, row/dropdown
+layout, mirroring `HintBar.h`/`Navigation.h`'s own precedent) wired into `main.cpp`. Every item
+with an existing keyboard shortcut reuses `SimulateKeyPress` (IS-0003) to invoke the exact same
+handler a second time rather than duplicating logic; items naming a feature MyCommander doesn't
+have yet (archive packing, FTP, tree view, and others the request itself said weren't in scope)
+show "Not yet implemented". `Color mode` (Settings menu) is the one new piece of logic: toggles
+`colorTheme`, persists it via a new `Config.h` function (`UpdateConfigValue`, which rewrites one
+key's value in place without disturbing the rest of the file), and applies it live via IS-0006's
+existing `ApplyConfigLive`. Reserving the bar's own top row required threading a `topOffset`
+through `DrawFrame`/`ComputeVisibleRows`/`HitTestPanel` — the same "must stay in exact agreement"
+discipline IS-0007's bottom hint-bar reservation already established, mirrored at the opposite
+edge of the screen. See `AIPrompt/features/FEA-0005-plan.md` for the full design and status.
+1.1.1 (2026-09-28) Polish: changed the `Settings` menu's own top-level mnemonic from `Alt+T` to
+`Alt+E` (matching its own "Edit settings" item) per a follow-up request. This surfaced a real
+mnemonic-priority bug: `E` is also an item mnemonic within `File` ("Generate Check Code") and
+`View` ("Executable properties"), so while either of those menus was open, `Alt+E` would
+previously have matched the open menu's own item first rather than switching to `Settings`
+(the same latent class of bug already existed between `Commands`' own `C` mnemonic and `File`'s
+"Compare contents" item). Fixed by reordering `wmain`'s menu key dispatch so `Alt+<letter>`
+always tries a top-menu switch before an open menu's own item mnemonics; a bare letter (no Alt)
+still selects an item in the open menu unchanged. See `AIPrompt/features/FEA-0005-plan.md`'s
+addendum. No `Implemented`/Disposition change; full test suite re-run (375 cases, 11,660 checks,
+0 failed).
+1.2.0 (2026-09-28) FEA-0003: added a File Properties view (`Alt+Enter`, also reachable from the
+View menu's "Executable properties" item, FEA-0005) — `PROP-001`-`004`. New `FileInfo.h`/`.cpp`
+module: `IsRunnableExtension` (pure), `ReadFileVersionFields` (generalizes `Help.cpp`'s own
+VERSIONINFO-reading pattern to an arbitrary file), `CheckDigitalSignature` (Authenticode via
+`WinVerifyTrust`). Reuses the existing `ShowMessage` dialog unchanged — no new `Dialog.cpp` code.
+Two real bugs were found and fixed during live verification against real system files
+(`notepad.exe`/`cmd.exe`), neither anticipated by the initial design: (1) the version-info reader
+hardcoded the US-English `"040904B0"` language block, which fails for any non-English-built file
+— fixed by reading `\VarFileInfo\Translation` first, the standard technique; (2) most Windows
+system binaries are catalog-signed, not embedded-signed, so the original `WinVerifyTrust`-only
+check reported them all as unsigned — fixed by adding a catalog-lookup fallback
+(`CryptCATAdminAcquireContext`/`CryptCATAdminEnumCatalogFromHash`), which also surfaced that the
+commonly-copied `DRIVER_ACTION_VERIFY` subsystem GUID returns `ERROR_ACCESS_DENIED` for a
+non-elevated caller — a `nullptr` subsystem works correctly instead, matching SEC-002's "never
+require elevation for ordinary operation." Both fixes verified against
+`Get-AuthenticodeSignature`/`.VersionInfo` ground truth. See `AIPrompt/features/FEA-0003-plan.md`
+for the full design, both bug write-ups, and status. Full test suite: 385 cases, 11,686 checks,
+0 failed.
+1.3.0 (2026-09-30) FEA-0002 Phase 1: added a native, DLL-based MC Plugin architecture (`PLUG-001`
+through `010`, all Implemented; `PLUG-011`-`013` are Phase 2/3, `LATER`) — promotes `EXT-003` from
+`LATER`/Not Started to `IN-MVP`/Partial. Plugin DLLs cross the boundary as plain C, not C++ (no
+stable ABI for C++ vtables across compilers/toolset versions) — three new SDK headers
+(`Source/MyCommanderPluginSdk/McPluginAbi.h`/`McPluginHost.h`/`McPluginTypes.h`, header-only, no
+library to link) define the identity/metadata/lifecycle types and the `McPluginHost` function-
+pointer struct a plugin is handed once at `Init`. New `Source/MyCommander/PluginManager.{h,cpp}`
+(the host-side discovery/loading/lifecycle/menu/shortcut-registry/SEH-wrapped-dispatch
+implementation) and `PluginManagerLogic.cpp` (the pure decision logic split out into its own
+translation unit, TST-005's precedent, so it's testable without pulling in
+`Dialog.cpp`/`Console.cpp`): `IsPluginApiCompatible` (major must match exactly, minor may be
+older-or-equal), `MergePluginMenuItems` (built-in `MenuBar.h` items plus a runtime plugin overlay,
+merged fresh rather than mutating the built-in table), `ConflictsWithBuiltinShortcut` plus a
+hand-maintained `BuiltinShortcutInventory`. `MenuBar.h`'s `MenuItemKind` gained a `PluginCommand`
+value; `Theme.h` gained a `RegisterThemeChangeListener` hook `ApplyThemePalette` calls after every
+live theme change. New `Config::disabledPluginIds` (following `ConfigKeyBlocks()`'s existing
+per-key convention) lets a user disable a specific plugin without removing its file. Every call
+*into* plugin code is wrapped in SEH (`__try`/`__except`) — a documented, best-effort isolation
+guarantee (structured exceptions only, not every possible failure mode of in-process third-party
+code), confirmed acceptable by the user before implementation began given the alternative (true
+process isolation) is a fundamentally different, much larger architecture than "load a DLL into
+this process." New `Source/ExamplePlugin/` (a standalone `.vcxproj`, not part of
+`MyCommander.sln`) and `Source/MyCommanderPluginSdk/DEVELOPER_GUIDE.md` (the plugin-author-facing
+guide, Phase-1 chapters only). Added 15 `PluginManagerTests.cpp` cases for the pure logic; the
+real `LoadLibraryW`/SEH-wrapped-call code has no automated coverage, matching `Elevation.h`'s own
+`RunElevated` precedent. Verified: the example plugin's DLL exports (`McPlugin_GetInfo`/`Init`/
+`Shutdown`/`OnMenuAction`/`OnShortcut`) confirmed undecorated and correctly named via `dumpbin
+/exports` — full interactive in-app verification (a plugin's menu item actually appearing/firing)
+remains outstanding, no interactive-console capture available in this environment. Full test
+suite: 400 cases, 11,711 checks, 0 failed. See `AIPrompt/features/FEA-0002-plan.md` for the full
+design, phasing rationale, and status.
+1.4.0 (2026-09-30) FEA-0002 Phase 2: added Help/Markdown integration (`PLUG-011`, now
+`IN-MVP`/Implemented). New `kMcPluginCapHelp` capability bit and
+`McPlugin_GetHelpMarkdownFn`/`McPlugin_GetHelpMarkdown` export (`McPluginAbi.h`) — a plugin's own
+Markdown help content, fetched fresh (SEH-wrapped) every time the F1 screen opens via
+`PluginManager::CollectHelpContent()`, never cached across screens. New, deliberately minimal
+`Source/MyCommander/MarkdownRenderer.{h,cpp}` (headings, bullet lists, plain paragraphs, inline
+code spans stripped rather than specially colored — not a general CommonMark implementation;
+anything more exotic degrades to a plain paragraph line), pure and independently unit-tested
+(`MarkdownRendererTests.cpp`, TST-005 precedent). `Help.h`/`Help.cpp`: `ShowShortcutReference`
+gained an optional `pluginContent` parameter (default empty, so the screen is unchanged from
+before this feature whenever no `kMcPluginCapHelp` plugin is loaded); a new "Plugins" section is
+appended after the built-in categories, one sub-heading per loaded plugin (its own `name`)
+followed by its Markdown rendered through the mini-renderer. `main.cpp`'s one call site now
+passes `pluginManager.CollectHelpContent()`. Full test suite: 413 cases, 11,756 checks, 0 failed
+(13 new). See `AIPrompt/features/FEA-0002-plan.md` for the full design and status.
+1.5.0 (2026-09-30) FEA-0002 Phase 3: added panel content (`PLUG-012`) and inter-plugin services
+(`PLUG-013`), both now `IN-MVP`/Implemented — FEA-0002 is fully delivered across all three phases.
+`Panel.h` gains `IPanelContent` (`Draw`/`OnKey`/`OnMouseClick`, pure virtual — no plugin/DLL
+dependency leaks into `Panel.h` itself) and an optional, non-owning content pointer + title;
+`main.cpp`'s `DrawPanel` renders through it (in place of the path/volume header it replaces with
+the plugin's own `title`, and Entries()/cursor in the body) when installed, and the key-dispatch
+switch/`HandleMouseEvent` forward every key except `Tab`/`F10`, and every left-press/double-click
+landing in that panel's body, to the plugin instead of that panel's own built-in
+navigation/selection/click handling — panel navigation itself (real path/history) stays untouched
+underneath, just not shown while content covers it (§8's own "content/input only", not a full
+alternate `Panel`). New ABI: `kMcPluginCapPanel`/`kMcPluginCapServices` capability bits,
+`McPanelSide`/`McPanelColor` enums, `McPlugin_OnPanelDraw/Key/ClickFn` (plugin-export typedefs,
+`McPluginAbi.h`) and `McHost_RequestPanelContentFn`/`ReleasePanelContentFn`/`PanelDrawTextFn`/
+`PublishServiceFn`/`QueryServiceFn` (host-function typedefs, appended to the end of
+`McPluginHost` — `MC_PLUGIN_API_VERSION_MINOR` bumped 0 → 2, covering this and Phase 2's earlier,
+never-separately-released `kMcPluginCapHelp` addition). `PluginManager` gains a nested
+`PanelContentAdapter` (private to `PluginManager.cpp`, forwarding Draw/OnKey/OnMouseClick to the
+owning plugin's exports, SEH-wrapped like every other call into plugin code) plus a host-mediated
+`std::map<std::wstring, ServiceEntry>` service registry (`PublishService`/`QueryService`,
+`interfacePtr` opaque to the host) — both released/unpublished automatically at their owning
+plugin's unload, the same host-owns-cleanup convention as menu items/shortcuts (§5). No new
+automated test coverage (`PluginManager`'s real Win32/SEH-dependent code has none, matching
+`Elevation.h`'s own `RunElevated` precedent, extended consistently to Phase 3). Full test suite:
+413 cases, 11,756 checks, 0 failed (unchanged from Phase 2 — no new pure logic to extract this
+phase). See `AIPrompt/features/FEA-0002-plan.md` for the full design and status.
+1.5.1 (2026-10-01) IS-0009: three independent small asks. (1) Added an "Exit" item (mnemonic `X`,
+matching Total Commander's own `File > Exit`) to the File menu (`MenuBar.h`), replaying `F10` via
+the existing `SimulateKeyPress` mechanism (MENU-002) rather than a second quit path. (2) Help
+screen (F1): a plugin's own name row and any `#` heading inside that plugin's own Markdown
+rendered identically (`kAttrSection`), leaving no visual way to tell where one plugin's help text
+begins versus a heading inside it — added a new full-width `====` "selector" row (plain ASCII,
+`kAttrHeader`, used nowhere else in this screen's body) immediately before each loaded
+`kMcPluginCapHelp` plugin's own block (`PLUG-011` stays Implemented — this refines its rendering,
+not its existence). (3) New `UI-015` ("the terminal window/tab title shall identify the running
+application and its version"): new `Console::SetTitle` (`SetConsoleTitleW`), called once in
+`wmain` right after `Console console;` is constructed, showing `MyCommander - <version>` via the
+same `MC_VERSION_STR` the startup log line and `--version` already use. See
+`AIPrompt/fixes/IS-0009-fixplan.md` for the full design and status. Full test suite: 414 cases,
+11,762 checks, 0 failed (1 new).
+1.6.0 (2026-10-01) FEA-0007 Phase 1: added ZIP packing via a new standalone MC Plugin
+(`Source/ZipPlugin/`, built on FEA-0002's plugin architecture, not a built-in feature) —
+`ZIP-001`/`002`/`003`, now `IN-MVP`/Implemented; `DEC-010` decided (vendored
+[miniz](https://github.com/richgel999/miniz) 3.1.2, MIT-licensed, this project's first vendored
+third-party source, verified to compile cleanly and round-trip a CRC32 check against the real
+library before being wired into anything). `MenuBar.h`'s built-in `"Pack Files"` stub is removed
+entirely — the plugin registers its own `"Pack file"` item (mnemonic `P`, the stub's own former
+letter) instead; with no ZIP plugin installed, the File menu simply has no packing item. New
+generic SDK prerequisites (none ZIP-specific, reusable by any future plugin):
+`McHost_ShowFormFn`/`McFormField` (a multi-field options dialog — checkbox/number/choice/text
+fields in one modal — new `Dialog.h`/`Dialog.cpp` `ShowFormDialog` plus pure, unit-tested
+`ApplyFormFieldKey`, TST-005 precedent) and side-scoped `GetActiveSide`/`GetPanelPath`/
+`GetPanelSelectedNames`/`RefreshPanel` (generalizing the existing active-panel-only queries so a
+plugin can address a specific side, needed here for "default output to the *other* panel's
+directory"). `MC_PLUGIN_API_VERSION_MINOR` bumped 2 → 3. Every packed entry's Win32 attributes are
+preserved via the ZIP format's own standard external-attributes field — not exposed by miniz's
+public writer API (confirmed by reading its source), so patched afterward at its fixed,
+spec-defined byte offset within the produced archive; verified correct via a standalone
+round-trip through miniz's own reader before being wired into the real plugin. "Without
+subdirectories" flattens a selected folder's own direct files into the archive root rather than
+nesting them (a documented simplification — two same-named files from different folders can
+collide; the later one is skipped, logged, not an interactive prompt); exceeding the configured
+size cap with splitting off surfaces as an after-the-fact notice rather than a before-the-fact
+prediction (accurately predicting compressed size ahead of compressing isn't practical);
+splitting bins entries by their own uncompressed size into independent, separately-openable
+`name.1.zip`/`name.2.zip`/... files, not true PKZIP-spec multi-volume spanning — all three are
+deliberate, documented departures from a theoretically fuller implementation, not oversights.
+`kMcPluginCapArchiveHandler`/`kMcPluginCapPanel` (claiming a `.zip` as a virtual directory, live
+browsing) are Phase 2/3, not yet implemented (`ZIP-004` through `007`, `Not Started`). Full test
+suite: 425 cases, 11,796 checks, 0 failed (10 new, `ApplyFormFieldKey`). See
+`AIPrompt/features/FEA-0007-plan.md` for the full design, phasing, and status.
+1.7.0 (2026-10-01) FEA-0007 Phase 2: added ZIP unpacking to the same standalone plugin —
+`ZIP-004`, now `IN-MVP`/Implemented. No new SDK surface needed at all; every host function Unpack
+uses (`GetSelectedNames`, `GetActivePanelPath`, `GetActiveSide`/`GetPanelPath`/`RefreshPanel`,
+`ShowTextPrompt`) already existed from Phase 1. `MenuBar.h`'s built-in `"Unpack Package"` stub is
+removed entirely, the same treatment `"Pack Files"` already got — the plugin registers its own
+`"Unpack Package"` item (mnemonic `U`, the stub's own former letter) alongside `"Pack file"` at
+`Init`. Extracts every selected `.zip` file's full contents into the other panel's directory (one
+subfolder per archive, named after the archive, when more than one is selected at once — matching
+how mainstream archive tools already batch-extract; a single selected archive extracts flat into
+the destination, no extra nesting layer, mirroring Pack's own single-archive convention),
+restoring each entry's stored Win32 attributes read back from the same external-attributes field
+Phase 1 writes. Reads the whole archive into memory first (never any of miniz's own
+`char*`-based file-opening functions, for the same Unicode-path reason Phase 1's writer avoids
+them) and rejects any entry whose name contains a `..` segment, a leading slash, or a drive letter
+before ever touching the filesystem — a zip-slip guard, since a corrupted or malicious archive
+could otherwise name an entry to escape the chosen destination. A destination file that already
+exists is skipped and logged, not overwritten, the same non-interactive-batch-operation
+convention Phase 1's own flattening-collision case already established. Verified via a standalone
+harness exercising the real `ExtractZipArchive`/`IsSafeArchiveEntryName` functions against a real
+archive (built with the already-verified Phase 1 writer): full pack→unpack round trip, nested
+directories auto-created, both attributes restored, content byte-exact, zip-slip rejected, and
+re-extracting into the same destination correctly skips rather than overwrites. Full test suite:
+425 cases, 11,794 checks, 0 failed (unchanged count — no new pure logic to extract this phase).
+Phase 3's `kMcPluginCapArchiveHandler`/`kMcPluginCapPanel` live browsing (`ZIP-005`-`007`) is
+implemented. See `AIPrompt/features/FEA-0007-plan.md` for the full design and status.
+1.7.1 (2026-10-02) IS-0010: six ZIP-plugin bug fixes plus one app-wide key-binding addition, all
+against already-`Implemented` requirements (no Implemented-field changes). (1) `PackSelection`/
+`UnpackSelection`/`ExtractOrMove`'s Copy branch now refresh the *source* panel too, not just the
+destination — matching the host's own Copy/Move convention that a completed operation leaves the
+source selection cleared (a `Panel::Refresh()` side effect), which these plugin operations
+previously skipped. (2) `ExtractOrMove`'s "Destination already exists" conflict dialog gained
+`Overwrite all`/`Skip all` options with blanket-choice tracking, matching `FOP-010`'s existing
+host-side `AskConflict` shape, which this plugin's own dialog never had. (3) Added `PollCancel` to
+the plugin host ABI (`MC_PLUGIN_API_VERSION_MINOR` 6 → 7, additive) so a plugin's long-running loop
+can poll Esc the same way `FileOps.h`'s own `CancelPoll` callback does; `ExtractOrMove`/
+`PackSelection`/`UnpackSelection` now check it per item, fixing Esc being silently queued and
+never consumed mid-extraction (it looked like the operation ignored cancellation and kept going).
+(4) `VK_DELETE` now triggers the same delete path as `F8`/`Shift+F8` (Recycle Bin / permanent,
+`main.cpp`'s key dispatch) and the same `F8`-mapped delete inside the ZIP archive browser
+(`ZipPlugin.cpp`'s `HandleArchiveKey`) — additive per `KEY-002`'s "familiar commander-style
+conventions," not a change to `KEY-003`'s own F-key wording. (5) `PackSelection`/`UnpackSelection`
+now show the same animated progress dialog (with the new cancel support) `ExtractOrMove`/
+`DeleteFromArchive` already had — packing and unpacking previously showed nothing until they
+finished. (6) The archive browser's attribute column now shows the normal panel's four-letter
+`R`/`H`/`S`/`A` string (`FormatZipAttributes`, mirroring `main.cpp`'s own `FormatAttributes`)
+instead of a raw hex dump of the Win32 attribute bitmask. The input-draining Esc-poll logic itself
+was factored out of `main.cpp` into `mc::PollAndConsumeEscape` (`Console.h`/`.cpp`) so the host's
+own `ProgressUi`/search cancel polling and the new `PluginManager::HostPollCancel` share one
+implementation rather than two independent copies of the same ~15 lines.
+1.7.2 (2026-10-02) IS-0011: fixed a real ZIP-plugin bug, plus three small additive enhancements, all
+against already-`Implemented` requirements (no Implemented-field changes). (1) `AddOtherPanelSelection`
+(`Shift+Insert`, add the other panel's selection into an open archive) stored every added entry's name as
+a 1024-char buffer padded with embedded NULs rather than the trimmed real name — `GetPanelSelectedNames`
+writes a null-terminated name into a raw buffer without shrinking the `std::wstring`'s own length, and
+unlike the already-correct `GetSelectedNamesList()` elsewhere in the same file, this call site never
+reconstructed a trimmed name from the raw pointer before storing it, corrupting the archive panel's
+display of the newly added entry until the archive was closed and reopened, and defeating the
+duplicate-entry check. Fixed by applying the same `std::wstring(const wchar_t*)` reconstruction
+`GetSelectedNamesList()` already uses; also moved the `Shift+Insert` key check ahead of
+`HandleArchiveKey`'s items-empty early return (it was previously swallowed on an empty archive/folder,
+exactly when adding the first file is most needed) and added user-visible `ShowMessage` feedback for
+every outcome (previously silent or log-only). (2) A plugin's own `McPluginMetadata::version` now shows
+next to its name on the F1 help screen (`LoadedPlugin`/`PluginHelpContent` gained a `version` field).
+(3) A new SDK mechanism, `McPluginVersion.h` (header-only, mirrors `Source/MyCommander/Version.h`'s own
+stringize convention) plus a copy-and-customize `PluginVersionTemplate.rc`, lets any plugin give its own
+DLL a proper embedded Windows file-version resource — `FileInfo.cpp`'s Alt+Enter reader was already
+fully generic, there was simply nothing for it to read before this existed; applied concretely to
+`Source/ZipPlugin/` (new `Version.h`/`ZipPlugin.rc`, `McPlugin_GetInfo`'s version string now derives
+from the same macros). (4) A new "Archive info" File-menu item shows file/directory counts,
+uncompressed/compressed size, and compression ratio, for either a `.zip` file selected in a normal
+panel or the archive currently open in the active panel — directory count is inferred from unique
+directory-path prefixes across file entries, since this plugin's own writer never stores an explicit
+directory entry.
+1.7.3 (2026-10-02) Follow-up bug report after 1.7.2 shipped: "Copy to zip not working (Copy right to
+left)" — pressing the host's own `F5` Copy with a normal panel active and an already-open ZIP archive
+as the destination silently copied the selected files onto the archive's real containing directory on
+disk instead of into the archive itself. Root cause: `RequestPanelContent` (Phase 3, §8) replaces only
+a panel's drawing/key handling, never its own real filesystem path underneath — `DoCopyOrMove` had no
+way to know the destination panel's real path wasn't actually where the user meant the files to go.
+Fixed with a new, generic, additive SDK export rather than a ZIP-specific special case:
+`McPlugin_OnReceiveFiles(side, sourceSide)` (`MC_PLUGIN_API_VERSION_MINOR` 7 → 8), called by the host's
+own `F5` handler before it falls back to the ordinary real-filesystem copy whenever the destination
+panel currently has plugin content installed; a plugin that doesn't export it (or declines) leaves
+today's fallback behavior completely unchanged. `ZipPlugin`'s own implementation reuses the exact same
+"add a panel's selection into the archive" logic its `Shift+Insert` shortcut already used (refactored
+into a shared `AddFilesFromPanel` taking an explicit source side). Scoped to `F5` Copy only — `F6` Move
+onto panel content is deliberately left as a follow-up, not attempted here, since a correct "Move"
+semantics would also need to delete the originals after a successful add, which risks data loss if
+rushed; the existing (if already-quirky, pre-dating this fix) Move-onto-the-real-directory fallback is
+unchanged in the meantime.
+1.8.0 (2026-10-02) IS-0012: two independent additions. (1) `NAV-011`, a new host-wide "Refresh
+panel" shortcut (`Ctrl+R`) — re-reads the active panel's directory from disk; no new SDK surface
+needed, since the host's existing panel-content key routing already sends every key but
+`Tab`/`F1`/`F10` straight to a plugin's own `OnPanelKey` while its content is active, so `ZipPlugin`
+simply handles the same key itself (`HandleArchiveKey`, reloading the archive via the existing
+`LoadArchive`) to make Refresh work for its own archive-browsing content too, documented as this
+project's own conventional "Refresh" key in `DEVELOPER_GUIDE.md` for any future plugin author. (2)
+`ZIP-009`, "Create directory" (`F7`) inside the archive browser — implemented as a genuine,
+persisted empty directory (a zero-byte entry whose name ends in `/`, the universal zip convention
+confirmed against miniz's own reader source), not a purely virtual folder that would vanish if the
+user never added a file to it. This required three existing code paths that previously assumed no
+explicit directory entry could ever exist to be updated: `LoadArchive` now loads such an entry
+(previously discarded on read, which would have silently dropped a created directory the next time
+the archive was reopened), `ExtractZipArchive` (the real on-disk "Unpack Package" path) now creates
+it on disk instead of skipping it, and `ExtractOrMove`/`ComputeArchiveStats` (IS-0011's "Archive
+info") were both updated to treat a directory-marker entry as a directory, not a zero-byte file, so
+neither corrupts a real extract-to-disk nor miscounts it in the file/directory statistics.
+1.8.1 (2026-10-02) IS-0013, `INST-007`: the installer (`MyCommanderSetup`) bundled exactly three
+`RCDATA` resources — `MyCommander.exe`, `USERGUIDE.md`, `LICENSE` — and had no code path touching
+any `Plugins` folder at all, for any plugin; confirmed the "(exception: ExamplePlugin)" in the
+report reflects the reporter's own local build folder rather than any actual installer handling,
+since there was none. `Tools/RebuildReleaseForInstaller.ps1` now also freshly rebuilds
+`ZipPlugin.vcxproj` (Release|x64, same never-stale discipline `INST-006` already gives
+`MyCommander.exe`) and stages its DLL; a new fourth `RCDATA` resource embeds it, extracted during
+install into the new install's own `Plugins\` folder. `ExamplePlugin` stays deliberately excluded —
+a developer-facing template, not a feature meant to ship to end users. Scoped to just `ZipPlugin`,
+the one real plugin today, rather than a generic multi-plugin embedding pipeline; extending to a
+second real plugin later is a small, obvious repeat of the same one-resource-one-extraction-call
+shape already established for `USERGUIDE.md`/`LICENSE`. A failed plugin rebuild/extraction warns
+rather than blocking the installer or the install itself — the app is fully usable with zero
+plugins installed, true today for every user, so a plugin payload problem must never block
+installing the core app. `ComputeInstalledSizeKB`/`RunUninstall` needed no change — both were
+already generic over whatever ends up under the install folder.
+1.8.2 (2026-10-02) IS-0014, `ZIP-010`: the ZIP archive browser repacked the *entire* archive on
+every single edit — `Shift+Insert`/`F5`-receive add, `Ctrl+A` attribute toggle, `F8`/`Delete`, `F7`
+create directory, and `F6` move-out each independently called `WriteArchiveEntries` immediately.
+`ArchiveView` gained a `dirty` flag; all five operations now go through a new `ApplyArchiveChanges`
+(updates `view.entries`, sets `dirty`, no disk write) instead, and the actual repack-and-write
+happens only once, via a new `SaveArchiveIfDirty`, when the user leaves the archive (`LeaveOrUp` at
+the root level) — at which point, if dirty, a `Save and leave`/`Discard and leave`/`Cancel` prompt
+appears, exactly matching the issue's own wording; a *clean* archive's existing plain "Leave
+archive?" confirmation (`ZIP-007`) is unchanged. A failed save keeps the archive open rather than
+leaving anyway, so a transient write failure can't lose edits. Two guards were added because
+deferring writes otherwise introduces new ways to silently lose them: `Ctrl+R` (reload) now confirms
+before discarding pending changes (a reload replaces `view.entries` wholesale from disk), and
+`McPlugin_Shutdown` auto-saves (best-effort, no prompt) any archive still open and dirty when the
+whole app quits, since there's no existing hook for a plugin to block or confirm shutdown. A `*`
+after "Name" in the archive panel's own header row marks unsaved changes — a small, self-contained
+addition needing no host/SDK change. Entirely within `Source/ZipPlugin/ZipPlugin.cpp`; no host or
+SDK changes at all. Bumped `Source/ZipPlugin/Version.h` `MCPLUGIN_VERSION_MINOR` 9 → 10 (0.9.0 →
+0.10.0 — a behavior change, not just a fix).
+1.9.0 (2026-10-02) IS-0015, parts 1-2 (`SEL-007`, `NAV-012`): two independent additions (part 3, a
+real single-line text editor with cursor positioning, is planned but deferred to a follow-up).
+(1) `SEL-007`: `Shift+Up`/`Shift+Down` now extend or shrink the selection as the cursor moves,
+Explorer-style, instead of only `Insert`'s toggle-and-advance. `Panel` gained a `selectionAnchor_`
+(the cursor position when a gesture starts) and `ExtendSelection(delta, visibleRows)`, which selects
+newly-covered entries while growing and deselects them while shrinking back over already-selected
+ground; any ordinary `MoveCursor` call (ordinary arrows, Tab, mouse clicks, Page Up/Down, Home/End,
+Refresh, directory navigation — everything already funnels through it) clears the anchor for free,
+so the next `Shift+Up`/`Down` starts a fresh gesture from wherever the cursor then is. No persisted
+anchor existed anywhere before this (confirmed: the existing Ctrl+click mouse range-select's own
+"anchor" was always just the cursor position captured locally at click time, per `README.md`'s own
+note). Scoped to `Shift+Up`/`Down` only, matching the issue's own wording, not
+`Shift+Page Up/Down`/`Home`/`End`. (2) `NAV-012`: when both panels show the same directory, an
+operation performed via one panel now keeps the other synchronized — confirmed by reading every
+`Do*` operation that Rename, Create directory, Create empty file, Delete, Change attributes,
+Execute, and the synchronous Edit-and-wait path each refreshed only the *target* panel, never
+checking whether the other panel happened to show the same place (Copy/Move and the two
+shell-command paths already refreshed both unconditionally, so weren't part of this gap). New
+`PathsEquivalent` (`PathUtil.h`, wrapping `std::filesystem::equivalent` — case-insensitive and
+separator-agnostic on Windows, unlike `path`'s own `operator==`, matching `FileOps.cpp`'s own
+existing use of the same underlying function) backs a new `SyncOtherPanelIfSamePath` helper, called
+after each of those six operations' own existing refresh; `PluginManager::HostRefreshPanel` (used by
+any plugin's own `RefreshPanel`, including ZipPlugin's) gained the identical check, closing the same
+gap for plugin-triggered refreshes with no plugin-side change needed. The pre-existing
+`RefreshPanelsForEditedFile` (IS-0002's async file-change-notification path) was also switched from
+a plain, case-sensitive `path == path` to `PathsEquivalent`, fixing the one place same-path logic
+already existed but used the wrong comparison.
+1.9.1 (2026-10-02) User-reported bug fix, same day: `SEL-007`'s first implementation (the
+anchor-based "extend/shrink a range" design above) had a permanent, reproducible bug — the entry
+where a Shift+Up/Down gesture *started* is always one of the range's own two endpoints, so it stays
+part of every non-empty range for the gesture's whole remaining lifetime; no sequence of further
+Shift+Up/Down presses, in either direction, could ever deselect it again. Reported by the user as
+"last item never deselected even up or down." Replaced entirely with a simpler, anchor-free design:
+`Panel::ToggleSelectionAndMove(delta, visibleRows)` — Down toggles the entry being left, then moves
+(identical to `Insert`'s own existing `ToggleCursorSelection`); Up moves first, then toggles the
+entry just arrived at. This pairing is what makes the gesture fully reversible: moving one way then
+immediately back over the same entries toggles each one exactly twice (a net no-op), so shrinking a
+selection all the way back now always clears every entry it covered, including the one the gesture
+started on — confirmed by a new regression test, `Panel_ToggleSelectionAndMove_DownThenUpFullyRetraces`,
+exercising exactly the reported scenario. `selectionAnchor_` and the old `ExtendSelection` were
+removed outright (no deprecation shim — nothing outside `Panel`/`main.cpp`'s own two call sites ever
+referenced them). `SEL-007`'s own requirement wording, `Help.cpp`, and `README.md` updated to
+describe the corrected (toggle, not range-extend) behavior.
+1.10.0 (2026-10-02) IS-0015, part 3 (`UI-016`): the one remaining deferred piece — a real
+positionable cursor for every single-line text-editing surface — rather than each of the
+command line, `ShowTextPrompt`, and `ShowFormDialog`'s Text fields independently reimplementing
+the same append-at-the-end/Backspace-removes-the-last-character-only editor. Added one new
+shared, pure primitive, `LineEdit`/`ApplyLineEditKey` (`Dialog.h`/`DialogInput.cpp`, TST-005
+precedent): printable character inserts at the cursor and advances it (same 240-character cap
+as before); `VK_BACK` erases before the cursor (no-op at position 0); `VK_DELETE` erases at the
+cursor, forward-delete (no-op at the end); `VK_LEFT`/`VK_RIGHT` move the cursor by one, clamped;
+`VK_HOME`/`VK_END` jump to the start/end. All three call sites now delegate to it:
+`ApplyTextPromptKey` gained a `currentCursor` parameter and `ShowTextPrompt` draws a real cursor
+glyph at its position (no longer a trailing `_`); `FormField` gained a `textCursor` field and its
+Text case delegates directly; the command line (`main.cpp`) gained a parallel
+`commandLineCursor` local (kept separate from `commandLine` itself, since many existing call
+sites only ever check it for emptiness) and the same cursor-glyph rendering in `DrawFrame`.
+Deliberately out of scope, matching the issue's own "minimal but usable editor" wording:
+word-jump (Ctrl+Left/Right), in-line text selection, clipboard cut/copy/paste, and an Insert-key
+overwrite-mode toggle. One design deviation from the original fix plan, discovered only once the
+actual current `main.cpp` was read rather than assumed: the plan's own text claimed
+`VK_HOME`/`VK_END` were "free today" for repurposing, but they already have an unconditional,
+shipped meaning (jump the panel cursor to the first/last entry) — not free. Resolved by gating
+Home/End on `commandLine.empty()`, the exact same dual-meaning convention already shipped for
+Backspace (`ClearCommandLineChar` vs. `GoToParentDirectory`), now also extended to `VK_DELETE`
+(forward-delete in the command line vs. `F8`/`Delete`'s existing file-deletion meaning, split
+into two separate `switch` cases). `DialogInputTests.cpp` gained dedicated `ApplyLineEditKey`
+cases (insert at start/middle/end; backspace/delete at start/middle/end including the no-op
+boundary cases; Left/Right/Home/End clamping; the 240-character cap; an unrecognized key
+returning `false`) plus corrected two existing assertions that were specifically about the old
+append/backspace-only semantics, not just recompiled: `ApplyFormFieldKey_Text_BackspaceOnEmptyIsNoOp`
+(renamed `..._IsRecognizedNoOp`) now expects `true` (Backspace is a recognized line-editing key
+even when it's a no-op), and the old `ApplyTextPromptKey_ArrowKeyWithNoCharacter_LeavesTextUnchanged`
+was replaced with a test that verifies Left/Right actually move the cursor, since they're no
+longer true no-ops.
+1.10.1 (2026-10-05) IS-0016 (`UI-016`): the line editor existed in every filename/path dialog
+since 1.10.0 but looked missing outside the command line. Root cause: the dialog cursor was drawn
+with `kAttrHeaderActive`, whose value equals `kAttrBody` (white on dark blue) in every theme, so
+it vanished on the dialog's own background. Fixed with a dedicated `ThemePalette::attrCursor` /
+`kAttrCursor` (black on white, inverse video, ~21:1) shared by `ShowTextPrompt`,
+`ShowFormDialog`'s Text fields and the command line; `ShowChoiceDialog`'s focused option
+(same invisible-on-blue bug) now uses `kAttrSelected`. Over-long text now scrolls horizontally in
+all three editors via a new pure helper, `ComputeLineEditViewOffset` (`DialogInput.cpp`,
+display-column-aware per UI-011, minimal scrolling); the command line's path prompt is shortened
+to `...` plus its tail when it would take more than half the row. Plugin form Text fields
+(`HostShowForm`) now start with the cursor at the end of a pre-filled value instead of position 0.
+New tests: `attrCursor` joins the WCAG AA palette audit, a regression guard that the cursor's
+background differs from every surface a line editor is drawn on, and eight
+`LineEditViewOffset_*` cases. Not changed: the plugin SDK's theme snapshot (plugins don't draw
+host line editors).
+1.10.1 (2026-10-05, same release) `FOP-019` (new): `Shift+F5` "copy as". Previously Shift was
+ignored and Shift+F5 behaved like F5 — the typed name was taken as a destination *directory*, which
+was offered for creation, with the source copied into it. Now `DoCopyAs` (`main.cpp`) prompts with
+the cursor entry's own name and resolves the input via the new `ResolveCopyAsTarget` (`PathUtil.h`):
+relative → source directory, full path → as given, existing directory / trailing `\` → inside it,
+original name kept. The copy goes through the new `CopyItemAs` (`FileOps`), which shares
+`CopyItems`' entire engine (conflict prompt, retry, progress, elevation, safety guards) via an
+internal `CopyItemsImpl` taking (source name, target name) pairs. A missing target folder still gets
+the usual "Create destination?" prompt. New guard in that shared engine: copying an item onto itself
+(also reachable via F5 into the same directory + Overwrite) now fails cleanly instead of reaching the
+OS; it runs after the conflict prompt, so Rename still duplicates in place. Hint bar (File
+context), `Help.cpp` and `README.md` list Shift+F5.
+ZipPlugin 0.11.0 (2026-10-05) FEA-0008 / `ZIP-011` (new): the ZIP-panel half of Shift+F5 "copy as".
+Before, the plugin's `HandleArchiveKey` ignored modifiers, so Shift+F5 on an archive panel silently
+did plain F5's extract-to-other-panel. Now `CopyWithinArchive` prompts with the cursor item's name,
+resolves the input with the new pure `ResolveArchiveCopyTarget` (relative to the current archive
+folder; `\` normalized to `/`; an existing folder or trailing slash receives the copy under its own
+name; `..`, `.`, empty segments, a leading slash or a drive refused via the existing zip-slip guard;
+unchanged name, folder-into-itself and file-in-the-way refused), plans the entry copies with
+`PlanArchiveCopy` (a folder copies every nested entry including its marker), asks Overwrite / Skip
+existing / Cancel on conflicts, and applies the result through `ApplyArchiveChanges` — saved only
+when leaving the archive (`ZIP-010`). Copying a full disk path from the ZIP prompt is refused (that's
+F5's job); only the cursor item is copied. `ZipNavigationTests.cpp` gained resolver/plan cases and
+end-to-end Shift+F5 checks, and its three on-disk checks that went stale with IS-0014's deferred
+saves now save explicitly first.
+1.11.0 (2026-10-05) FEA-0009 — per-extension file actions (`VEE-009`, now IN-MVP, plus new
+`VEE-010`..`VEE-013`, `DEC-011`). New pure module `FileActions.{h,cpp}` parses
+`%APPDATA%\MyCommander\file-actions.conf` (`[patterns]` blocks; `type[*] = description | program |
+arguments`; types `view`/`open` from one extensible keyword table; unknown types and malformed lines
+skipped with CFG-005-style warnings), matches a file name (extension, wildcard glob, or exact name),
+picks the default (first `*`, else first match, in file order), expands `%f %n %b %e %d %%` (quoted
+`"%f"` appended when no file placeholder is present), and performs Phase 2's line-level edits (add /
+remove / set default) that leave every other line byte-for-byte intact. `main.cpp`: F3 runs the default
+View action (built-in viewer fallback), Shift+Enter the default Open action (Windows-association
+fallback, not waited on), Shift+F3 a chooser over every registered action plus the two built-ins
+(new generic `ShowListChoice` dialog, pure `ApplyListChoiceKey`), Enter with `enterFileAction = view`
+honors a registered View program and the new `enterFileAction = open` value runs the Open action;
+programs start via the new `RunDetachedCommandLine` (user-quoted argument template passed verbatim),
+detached, never elevated. The file is created with a commented sample on first run, loaded at startup
+(warnings shown once) and reloaded lazily whenever its timestamp or size changes. File > Assign File to
+App (`MENU-003` stub since FEA-0005) is now the manager for the cursor file's extension: set default,
+remove (confirmed), add via `ShowFormDialog`, or open the file in the external editor. New
+`FileActionsTests.cpp` plus `ApplyListChoiceKey` and `enterFileAction = open` tests.
+1.12.0 (2026-10-05) VEE-005 — hexadecimal viewing (now IN-MVP): the built-in viewer (`F3`,
+Enter-on-file via `internal:viewer`) gains a hex view. `H` switches between text and hex and keeps the
+position (text line <-> first visible byte via `LineIndexForByte`). In hex view `W` cycles the items per row
+8 -> 16 -> 32 -> fit (default 8 each time the viewer opens; fit picks the largest of 8/16/32 that fits the
+terminal width) and `Left`/`Right` pan horizontally, since a 32-item row is 147 columns wide. Rows are read on demand from the open file, so a multi-gigabyte file costs
+one screen of bytes per paint. Search works in both views: plain text is ASCII (case-insensitive for A-Z;
+its UTF-8 bytes in hex view), and a query starting with `#` searches for hex bytes (`#4D 5A`, invalid patterns
+are reported, not searched). Text view keeps its existing line-by-line search, so UTF-16 files still match.
+A hex-view match is highlighted until the next key. Pure logic lives in the new `HexDump` module (column
+layout, row formatting, byte-pattern search over bounded chunks, scroll limits), with 29 unit tests.
+Deviations from the fix plan, recorded in `AIPrompt/features/VEE-005-plan.md`: the search prompt's title
+is fixed rather than changing as the query is typed (`ShowTextPrompt` has no per-keystroke title); the hex
+status line and key hints share one row, so the hint is trimmed on narrow terminals (a two-row layout is
+deferred). `VEE-007` (built-in editor) remains postponed. Version header synced `1.10.0` -> `1.12.0` (the
+1.11.0 FEA-0009 entry had not been reflected there).
+1.13.0 (2026-10-05) VEE-005 — hex view gains a real cursor, separate from the view's scroll position: a
+single byte, highlighted in both the hex digits and the ASCII column for that byte. `Up`/`Down`/`Left`/
+`Right`/`Page Up`/`Page Down`/`Home`/`End` now move the cursor in hex view -- a behavior change from the
+1.12.0 entry above, where `Left`/`Right` panned the view and the other keys scrolled it with no cursor at
+all. The view scrolls and pans only as far as needed to keep the cursor visible (new `ensureCursorVisible`
+in `Viewer.cpp`), the same way a text editor's cursor and scrollbar interact; manual panning is gone, since
+moving the cursor through a row wider than the terminal now scrolls it into view on its own. The status
+line's `Offset` is now the cursor's own position, not the first visible byte. Entering/leaving hex view
+(`H`) and a search hit all set the cursor, so the position carried over between text and hex view, and
+between repeated `n` searches, is the cursor's. The cursor uses `Theme.h`'s `kAttrCursor` (already added
+for IS-0016's line-edit cursors), kept visually distinct from a search hit's `kAttrHeaderActive`; where
+both land on the same byte the cursor is drawn last, on top. Changing the item-per-row setting (`W`) keeps
+the cursor on the same byte. **Process note:** the Revision 2 update folded into the 1.12.0 paragraph above
+edited it in place instead of appending a new paragraph, unlike this project's own documented practice (see
+the 1.9.1 entry, which kept its superseded design as a historical record) -- not repeated here or going
+forward.
+1.14.0 (2026-10-06) UI-013, Part B — directory-tree layout (now IN-MVP; Partial because Part A, the
+single-panel layout, is not implemented yet). `Ctrl+T` (or `View` → `Tree`, previously a "not yet implemented"
+stub) turns the active panel into a tree of its drive's or UNC share's folders, instead of a file listing.
+The tree is a native `IPanelContent` installed through the same `Panel::SetContent` mechanism the ZIP archive
+browser uses, so the screen layout is unchanged and the other panel stays a normal listing. New pure module
+`DirectoryTree.{h,cpp}`: `ListSubdirectories` (directories only, sorted case-insensitively, reparse points
+listed and marked, `nullopt` when a folder can't be read), `FindFilesystemRoot`, `ExpansionChain` (auto-expands
+the tree down to the panel's current folder), and `DirectoryTree` (lazy per-node loading, cursor, scrolling,
+Left/Right collapse/expand). Reparse-point folders are never expanded automatically (SEC-006). The wrapper
+`DirectoryTreeContent` in `main.cpp` renders, handles keys/mouse, and on Enter calls `Panel::NavigateTo` and
+releases the content. Esc, or Ctrl+T again, leaves without navigating. Ctrl+T is added to
+`BuiltinShortcutInventory`, so plugins can't claim it. Tests: 16 `DirectoryTreeTests.cpp` cases against real
+`TempDir` trees, plus a `MenuBarTests` case that the Tree item is a real simulated-key item.
+1.15.0 (2026-10-06) FOP-014, Phase 3 — background copy/move jobs (now IN-MVP; Partial because delete
+queueing and pause/resume are not implemented). `Alt+F5`/`Alt+F6` queue the selection as a job on a worker
+thread (`JobWorker`, `OperationQueue`), with the same destination prompt as F5/F6. Jobs run one at a time per
+drive or UNC share and in parallel across them. A name clash or failure becomes a prompt answered on the UI
+thread, and the job waits for the answer. `Alt+Q` (or `Commands` → `Job queue`) lists jobs with state and progress,
+and Enter on a job cancels it (the plan's Del key is not used). The window title shows active and queued counts,
+so the status line is unchanged. Changed panels refresh when their job finishes. F10 with active jobs offers to
+wait for them or cancel them and quit. Jobs live in memory only (ERR-006). Deviations from the plan: queuing covers
+copy and move only, and the status is in the window title. Also includes IS-0017 (UI-013 tree fixes: root children,
+`+`/`-` expand/collapse, scroll to the selected folder, and the other side's Enter/Backspace blocked while a tree is
+open there, plus preview of the cursor folder on the other side), recorded in `AIPrompt/fixes/IS-0017-fixplan.md`.
+1.15.1 (2026-10-07) IS-0018 (`FOP-009`/`PER-002`, `UI-013`). Recycle Bin delete (F8/Delete) now goes item
+by item like permanent delete: `FileOps::DeleteItems` recycles each selected item with its own
+`SHFileOperationW` call through `RunWithRetry`, so `DoDelete`'s animated progress dialog counts and
+animates for it, Esc stops between items, and a failing item gets its own Retry/Skip/Skip all/Cancel
+(never Elevate — SEC-003 stays permanent-only). This also fixes a reporting bug: one failure used to mark
+every selected item as failed even though the shell had recycled the rest. Queued delete jobs
+(`JobWorker`) get the same per-item progress. Tree view: `+`/`-` are recognized by the typed character, not
+only by virtual key, so `Shift+3` (Hungarian layout `+`) expands; `IPanelContent::OnKey` gained the
+character (host-internal; the plugin adapter ignores it, plugin ABI unchanged).
+1.16.0 (2026-10-07) `NAV-007` (LATER → IN-MVP, Implemented) — directory hotlist. `Ctrl+D` / `Commands` →
+`Directory Hotlist` lists named favorite folders: Enter goes there (`Panel::NavigateTo`, so NAV-009's reparse
+guard and LIST-006's inaccessible banner apply), "+ Add current folder" adds the active panel's folder under a
+typed name (pre-filled with its leaf name; no duplicates, compared lexically), Del removes (confirmed), F2
+renames. New pure `Favorites.{h,cpp}` (parse/format `%APPDATA%\MyCommander\favorites.conf` — UTF-8
+`name = path`, first `=` splits, CFG-005-style warnings for bad lines — plus `FindFavoriteByPath`,
+`DefaultFavoriteName`, `IsValidFavoriteName`), saved atomically after every change, re-read on every open.
+`FileActions.cpp`'s UTF-8 read/atomic-write helpers moved into a shared header-only `Utf8TextFile.h`.
+`ShowListChoiceWithKeys` (Dialog) closes the list on caller-chosen extra keys and reports which;
+`ShowListChoice` now wraps it. `Ctrl+D` added to `BuiltinShortcutInventory`. New `FavoritesTests.cpp`.
+1.17.0 (2026-10-07) `FOP-014` completed (Partial → Implemented; plan `AIPrompt/features/FOP-014-completion-plan.md`).
+Queued delete: `Alt+F8` (Recycle Bin) / `Alt+Shift+F8` (permanent), `Commands` → `Queue delete`, with the same
+`ConfirmDelete` as F8/Shift+F8 (D7, factored out of `DoDelete`); the worker already ran `JobKind::Delete`. Overlap
+safety (the original plan's unbuilt risk item, made pressing by queued delete — jobs were serialized per
+destination volume only, so a copy C:→D: and a delete of its C: source could run in parallel):
+`OperationQueue::NextToRun` also holds back a job overlapping (`JobsOverlap`, lexical `PathsOverlapLexically` over
+`JobPaths`) an active job or an earlier queued overlapping one, without head-of-line blocking unrelated jobs; and
+synchronous F5/F6/Shift+F5/drag-drop, F8/Shift+F8, F2, Ctrl+A, F7/Shift+F7 refuse paths an active job uses
+(`JobWorker::ActiveJobTouching`, message naming the job). Decided: background jobs never offer Elevate & Retry
+(SEC-003 — elevation stays a foreground, one-item action). Pause/resume removed from FOP-014's wording; it is
+`FOP-015` (unchanged, LATER).
+1.18.0 (2026-10-07) `FOP-017` (LATER → IN-MVP, Implemented; plan `AIPrompt/features/FOP-017-plan.md`) — group
+rename. `Ctrl+M` / `File` → `Group Rename` (was a MENU-003 stub): options form (name/extension masks with `[N]`,
+`[Nx-y]`, `[E]`, `[C]`, `[YMD]`, `[hms]`, `[P]`, `[[`/`]]`; case-insensitive plain search/replace; five case modes;
+counter start/step/digits; session-remembered) → preview (`ShowListChoiceWithKeys`; `!` marks Invalid —
+forbidden/control character, trailing dot or space, reserved device name, >255 — DuplicateTarget and
+ClashesWithExisting against the real folder listing; Enter refused while any problem exists; F2 back to the form)
+→ run. New pure `MultiRename.{h,cpp}` (expansion, validation, `BuildRenamePlan`, `OrderRenames`: dependency order
+for chains, `~mcren.<n>.tmp` to break cycles) and `FileOps::RenameItems` (item-by-item `RunWithRetry`, progress/Esc,
+never overwrites, rolls any temporarily-named item back to its original name). Also fixes `RenameItem` refusing a
+case-only rename (`report.txt` → `Report.TXT` reported "already exists"), which affected plain `F2` too. `Ctrl+M`
+added to `BuiltinShortcutInventory`; refused on plugin panels and on files a background job uses (FOP-014).
+1.19.0 (2026-10-07) `SRC-004` + `SRC-005` (LATER → IN-MVP, Implemented; plan `AIPrompt/features/SRC-004-005-plan.md`)
+— content search. `Alt+F7` is now a form: file name mask, containing text (empty = SRC-001's name search, unchanged),
+regular expression, match case, encoding (Auto/UTF-8/ANSI/UTF-16LE/UTF-16BE), skip binary; session-remembered. New
+pure `ContentSearch.{h,cpp}` (`ContentMatcher`: Unicode case-folded plain substring, or ECMAScript `std::wregex` with
+`icase` in the user's locale; invalid regex reported before the walk; `LooksBinary`) and header-only `TextCase.h`
+(invariant `LCMapStringEx` mapping, now shared with `MultiRename`). `TextFile::ForEachTextLine`: one bounded-memory
+pass in 64 KB chunks with the encoding choice (BOM-aware; Auto falls back to the ANSI code page per line), lines cut at
+256 KB raw. `Search`: `SearchOptions`, files only for content, first matching line per file (number + text), counts of
+files searched / unreadable / binary-skipped, a progress callback, Esc polled per line for regex. Results show
+`path :line: text`; `F3` opens `Viewer` at that line with a plain term pre-loaded for `n` (new `ViewerStart`).
+Measured guard rails, because one `std::regex_search` call can't be interrupted: a regex looks at a line's first
+1 024 characters (plain text 65 536) and gives up after 200 000 backtracking steps (`_REGEX_MAX_COMPLEXITY_COUNT`,
+defined only in `ContentSearch.cpp`, the sole user of `<regex>`) — a pathological `(a+)+b` line then costs ~2 s in a
+Debug build instead of >30 s.
+1.20.0 (2026-10-08) `SRC-006` (LATER → IN-MVP, Implemented; plan `AIPrompt/features/SRC-006-plan.md`) — compare
+directories. `Shift+F2` / `Selection` → `Compare Folders` (was a MENU-003 stub) compares the two panels' folders: a
+session-remembered form (compare by Name / +size / +timestamp / +content; include subfolders; timestamp tolerance,
+default 2 s; ignore an exact 1-hour difference; show the results list), live progress (items, bytes) with Esc honored
+per item and per 64 KB chunk, then — the Total Commander way — each panel's selection is replaced by its top-level
+differences (only-here items, the newer side, both sides of a difference without a newer side), so `F5` afterwards
+copies what is missing or newer. Results list: status (`=` `->` `<-` `>` `<` `!=` `!` `?`), relative path, both sides'
+size/time; `Tab` filters all/differences/left only/right only; `Enter` moves both panels to the item; `F3`/`Shift+F3`
+view left/right. New pure `DirCompare.{h,cpp}`: `ClassifyPair`, `CompareDirectories` (FindFirstFileExW listings,
+case-insensitive name matching, each side's NAV-010 hidden toggle and SRC-003 filter applied to files, reparse points
+never descended or read — SEC-006, recursive roll-up, 200 000-item cap), `FilesHaveEqualContent`. "Checksum" is met by
+an exact byte-by-byte comparison that stops at the first difference and never reads files of different sizes; with
+content, timestamps only decide which side is newer. Refused on plugin/tree panels, inaccessible locations, or when
+both panels show the same folder. `Shift+F2` added to `BuiltinShortcutInventory`.
+1.21.0 (2026-10-08) `SRC-007` (LATER → IN-MVP, Implemented; plan `AIPrompt/features/SRC-007-plan.md`) — directory
+synchronization. `Ctrl+Shift+F2` / `Commands` → `Synchronize Folders` / `F5` in the SRC-006 compare list (pre-filled
+from it): a session-remembered form (direction Left → Right / Right → Left / Both ways; compare by timestamp or
+content; subfolders, default on; "delete files only on the target", default off, one-way only, Recycle Bin only;
+tolerance / 1-hour), the compare with progress (a truncated compare is refused), then the **preview** — every
+planned action (`->` `<-` copy, `=>` `<=` overwrite, `DEL>` `<DEL` delete, `??` conflict) with totals, adjustable per
+item (Space on/off, `→`/`←` force a direction, `Del` mark an extra for deletion, all via `CanApply`) — and the
+**explicit confirmation**: counts, the first overwrites and deletions by name, *Back to preview* as the default
+button, always shown (no config opt-out). Execution: copies (grouped per folder through `CopyItems`; confirmed
+overwrites answered automatically, any other collision prompts) before deletions (`DeleteItems`, Recycle Bin); each
+item is re-read first and skipped as "changed since the preview" if its size/time/existence moved; `ReportOutcome`
+logs failures. New pure `DirSync.{h,cpp}`: `BuildSyncPlan` (the rule table; one-way: target newer = conflict,
+different = overwrite; both ways: different = conflict; file vs folder always a conflict; one-side folders whole),
+`CanApply`, `Overwrites`, `Summarize`, `GroupForExecution`, `ReadSide`/`SideChanged`. Refused for nested roots
+(`IsSameOrWithin`) and roots a background job uses (FOP-014). Two-way sync keeps no history, so it can't propagate
+deletions (documented). `Ctrl+Shift+F2` added to `BuiltinShortcutInventory`.
+(2026-10-08, no app version change) `ARC-001`, `ARC-002`, `ARC-003` (LATER/Not Started → IN-MVP/Implemented; check
+`AIPrompt/features/ARC-001-plan.md`) — the rows were stale: the ZIP plugin already delivers them (`ZIP-001`..`011`,
+`kMcPluginCapArchiveHandler`). ZipPlugin 0.12.0 also browses and unpacks ZIP-based packages — `.jar`, `.war`, `.ear`,
+`.apk`, `.xpi`, `.vsix`, `.nupkg`, `.whl` — via one `IsZipContainerName` list used by `McPlugin_CanHandleFile`, Unpack
+Package and the archive info command; Office/ODF/EPUB documents are deliberately not claimed, so Enter keeps opening
+them. Saving an edit into a signed package invalidates its signature (documented).
+1.21.1 (2026-10-08) IS-0019 (plan `AIPrompt/fixes/IS-0019-fixplan.md`) — going up a level selected `..` instead of
+the folder just left: `GoToParent`/Back passed no name, so the refresh kept the cursor on the child listing's `..`.
+`Panel::SetLocation` now selects `PathUtil.h`'s `ChildNameToward(destination, current)` whenever the caller names
+nothing — Backspace, Enter on `..`, `Alt+Left`, a typed parent path, the hotlist; several levels up select the first
+folder on the way. The restored name matches case-insensitively, and a cursor restored below the visible rows is
+scrolled into view (centered) using the row count the panel last saw — which also fixes the off-screen cursor after
+IS-0001's new item, SRC-002's and SRC-006's Enter.
+1.22.0 (2026-10-08) `KEY-005` (LATER → IN-MVP, Implemented; plan `AIPrompt/features/KEY-005-plan.md`) — shortcut
+rebinding through `%APPDATA%\MyCommander\keys.conf` (`command = key[, key...]`, `none` unbinds, unlisted commands
+keep their defaults; DEC-007 style, hand-parsed), applied on save. Settings → Edit key bindings (new) creates it
+with every command and default commented out and opens it. Scope (decided): main-screen commands (~50) and, through
+the same keys, tree/plugin panels and plugin shortcuts (`plugin:<id>/<commandId>`, applied by the host at
+registration and re-applied on reload — no SDK change); standard dialogs, the viewer and result lists stay fixed.
+New pure `KeyMap.{h,cpp}`: chord parse/format, the command table (defaults = today's keys), `Load` with KEY-006
+validation (unknown names/keys; fixed cursor/editing keys; typing keys incl. Ctrl+Alt/AltGr; Alt+menu mnemonics;
+first claim wins; a user key is taken from its default owner; `quit` always keeps a key), `Translate` (a user key →
+its command's default key; a freed default dropped on the main screen but passed through inside tree/plugin
+panels), `RelabelKeyText`, and the injected-key bypass (`NoteInjectedKey`/`ConsumeInjectedKey`) used by menus,
+hint clicks and a plugin's `SimulateKey`. `main.cpp` translates before the unchanged key switch (command-line
+editing keys exempt while it has text) and now dispatches plugin shortcuts before the switch (some cases ignore
+modifiers). F1 help, the hint bar (`RelabelHintSegments`) and the menus (new right-aligned shortcut column,
+decided) show the current keys; `BuiltinShortcutInventory(KeyMap)` follows the map for the plugin conflict check.
+Freed default keys stay silent (decided).
+(2026-10-08, planning only, no version change) `EXT-005` — decided to deliver FTP as a standalone MC Plugin
+(`Source/FtpPlugin/`), planned in `AIPrompt/features/EXT-005-plan.md`. Added §21.1 FTP Plugin Requirements
+(`FTP-001`…`FTP-012`, new `FTP-` namespace, all Not Started; `FTP-011` LATER), the EXT-005 row's pointer to it,
+DEC-012 (own Winsock FTP client vs WinInet) and DEC-013 (saved passwords in the Windows Credential Manager, opt-in)
+as open decisions, and the §29 note. The plan also schedules a backward-compatible SDK addition (plugin API 1.9,
+`kMcFormFieldPassword`) and removing the Network menu's two FTP stubs once the plugin provides them.
+1.23.0 (2026-10-08) `EXT-005` (LATER → IN-MVP, Implemented) with `FTP-001`…`010` and `FTP-012` Implemented
+(`FTP-011` LATER); DEC-012 and DEC-013 decided as recommended. New standalone `Source/FtpPlugin/` (FtpPlugin 0.1.0):
+`FtpClient` (own Winsock2 client — non-blocking sockets with every wait bounded by the connection's timeout and
+polling Esc; USER/PASS, FEAT, OPTS UTF8, TYPE I; EPSV→PASV (using the control connection's peer address) or
+EPRT/PORT; MLSD or Unix/Windows LIST; RETR/STOR with ABOR on cancel; MKD/RMD/DELE/RNFR-RNTO; a trace with `PASS`
+masked), `FtpParse` (pure parsers), `FtpConnections` (`ftp-connections.conf`, never a password; Windows
+Credential Manager opt-in), `FtpPluginUi` (download to `<name>.mcftp-part`, then replace — a failed or cancelled
+download never damages the existing file) and `FtpPlugin.cpp` (Network → "FTP connection" manager as a form with
+connection + action choices, "New FTP connection" form accepting `ftp://` URLs; the server panel with
+Enter/Backspace/F3/F5/F6/F7/F2/F8/Ctrl+R/selection keys and mouse; uploads via `McPlugin_OnReceiveFiles`;
+overwrite/overwrite all/skip/skip all/rename/cancel conflicts; reconnect on a dropped connection; Backspace at
+the root asks to disconnect). Host: SDK API 1.9 `kMcFormFieldPassword` → `FormField::masked` drawn through
+`DisplayedFieldText`; the Network menu's FTP stubs removed (the plugin adds both items with the same mnemonics);
+`build.cmd`, `RebuildReleaseForInstaller.ps1` and the installer build and bundle the plugin (FTP-012). Tests: two
+standalone harnesses — `FtpPluginTests.cpp` (64 checks: parsers, connections file, the client against an
+in-memory loopback server incl. PASV fallback, login failure, timeout, dropped connection, Esc mid-transfer and
+no password in the trace) and `FtpPanelTests.cpp` (23 checks: the plugin through a fake host — connect form,
+browse, view, download with conflicts, upload, F7/F2/F8/F6, disconnect, no password in the log).
+1.24.0 (2026-10-08) `EXT-003` (IN-MVP Partial → Implemented; plan `AIPrompt/features/EXT-003-plan.md`) and new
+`PLUG-014` (viewer plugins, Implemented). The check found commands, archive handlers and file-system providers (panel
+content + `OnReceiveFiles`, proven by ZIP and FTP) already delivered; the gap was viewers. Plugin API 1.9 → 1.10:
+`kMcPluginCapViewer` with `McPlugin_CanViewFile` (`kMcViewNo`/`Offer`/`Default`), optional `McPlugin_GetViewerName`
+and `McPlugin_RenderView(filePath, const McViewWriter*)` (AppendLine/SetTitle into a host-owned sink). The host renders
+into the pure `ViewLineSink` (capped at 2,000,000 lines / 256 MB, truncation marker), writes a temporary UTF-8 file and
+shows it in the built-in viewer under the plugin's title (new `ViewerStart::title`); a declined/crashed render falls
+back to the built-in viewer with a message (SEH, PLUG-009). F3 order (pure `ChooseViewRoute`): the user's
+file-actions view default → the first plugin claiming `kMcViewDefault` → built-in. Shift+F3 lists claiming plugins
+("(plugin)"), `file-actions.conf` accepts `plugin:<id>` for view actions only (VEE-009..013), and Assign File to App
+offers "Use a viewer plugin as the default view". A plugin's own `ShowFileViewer` (ZIP/FTP F3) goes through
+default-claiming viewers but never external programs. ExamplePlugin gains a hex-dump viewer (Offer only). EXT-002 (a
+common provider interface) stays LATER.
+1.25.0 (2026-10-09) `EXT-004` (LATER/Not Started → IN-MVP/Implemented; plan `AIPrompt/features/EXT-004-plan.md`)
+with new §21.2 `SFTP-001`…`SFTP-010` Implemented (`SFTP-011` LATER, new `SFTP-` namespace); DEC-014 (SSH
+transport: vendored libssh2 1.11.1, BSD-3-Clause, with the Windows CNG crypto backend plus its ECDSA option — no
+OpenSSL; checked against a real server: `ecdh-sha2-nistp256`, `ecdsa-sha2-nistp256`, `chacha20-poly1305`) and
+DEC-015 (host keys: MyCommander's own `known_hosts`, the user's OpenSSH one read-only, SHA-256 fingerprint
+confirmation on first use, a changed key always refused) decided. New standalone `Source/SftpPlugin/` (SftpPlugin
+0.1.0): `SftpClient` (non-blocking libssh2 session: every wait bounded by the timeout and polling Esc, transfers
+cancelled between 64 KB chunks so the session survives; password, keyboard-interactive, key file — PEM RSA with or
+without a passphrase, unencrypted OpenSSH ECDSA — and SSH agent (Windows OpenSSH agent or Pageant) logins; a trace
+that never contains a secret), `SftpLogic` (pure: fingerprints, the known-hosts verdict, key-file inspection with an
+explanation for unsupported formats, `sftp://` addresses, SFTP status texts) and `SftpPlugin.cpp` (the connection
+form, host-key prompts, menu items P/H/X). The FTP plugin's panel, transfers, conflicts, reconnect and connection
+manager moved unchanged into the shared `Source/PluginCommon/` (`RemotePanel`, `remote::Client`,
+`RemoteConnections`, `RemoteUi`, `FakeRemoteClient.h`), compiled into both plugin DLLs; the FTP harnesses (64 +
+28 checks) pass unchanged on it. New panel rule for both: a symbolic link to a folder opens with Enter but is never
+descended into when copying (skipped, logged) or deleting (the link itself is removed). Installer and `build.cmd`
+build and bundle the plugin (SFTP-010). Tests: `Source/SftpPlugin/BuildTests.cmd` — `SftpLogicTests` (37 checks),
+`SftpPanelTests` (38 checks: the plugin and shared panel on an in-memory server, host-key prompts, no secret in the
+log) and the opt-in `SftpIntegrationTests` against a real server (11 read-only checks passed against
+`test.rebex.net`; the write checks need `MC_SFTP_TEST_DIR`).
+1.26.0 (2026-10-09) `UI-013` (Partial → Implemented): Part A, the single-panel layout (plan re-checked against 1.25.0
+in `AIPrompt/features/UI-013-plan.md`, "Part A — revised plan"; all four open questions decided as recommended).
+`Ctrl+F1` (a new rebindable KEY-005 command `single-panel`, also in `BuiltinShortcutInventory`) or `View` → `Single
+panel` (P) shows only the active panel at full width; `Tab` switches which panel is shown, `Alt+F1`/`Alt+F2` show
+the side they change. The hidden panel keeps its folder, cursor, selection and content and stays the target of
+F5/F6/compare/sync; the bottom border names it (`FormatOtherPanelLabel`, UI-011 widths). One pure geometry,
+`ComputePanelLayout` (`Navigation.cpp`), now drives `DrawFrame`, `HitTestPanel` and the panel-content mouse
+forwarding (previously three hand-synchronized copies of the split); dual-pane output is pinned unchanged for widths
+60–300. The layout is a file-scope flag read by `DrawFrame`, so every dialog's background redraw keeps it, and is
+remembered in the NAV-008 session file (`singlePanel = yes|no`, cosmetic, restored even when paths are given on the
+command line). `View` → `Full`/`List` stay stubs, reserved for detailed/brief listings. Tests: Navigation (+5),
+Session (+2), KeyMap (+1), MenuBar (+1).
+1.27.0 (2026-10-09) `SRC-008` (LATER → IN-MVP, Implemented; plan `AIPrompt/features/SRC-008-plan.md`) and new
+`SRC-008a` (merging, LATER). Decided: `Alt+F3` (new rebindable command `compare-files`; `Shift+Alt+F3` always uses
+the built-in viewer), the optional `diffProgram` setting, merging deferred, and the file choice: two files selected
+in the active panel, or one selected in each panel; otherwise the active file and the same name (else the cursor
+file) in the other panel. New pure `TextDiff.{h,cpp}`: linear-space Myers line diff over interned normalized lines
+(case-folded via `TextCase.h`, trailing/all whitespace ignored on request) with prefix/suffix trimming, a 20,000-edit
+cap and cancel; removed/added runs paired into Changed rows; character-level `ChangedSpans`; difference navigation;
+`FirstDifferenceOffset` for binary files; `ChooseFilesToCompare`; `BuildExternalDiffCommand`. New `DiffViewer.{h,cpp}`:
+side-by-side or unified (automatic below 100 columns), line numbers, `<`/`>`/`~` markers plus four new theme colours
+(both palettes, contrast-tested), F7/Shift+F7, U, I, W, F3/Shift+F3. File → Compare contents is no longer a stub; the
+folder-compare results list gains `Alt+F3`. Files over 64 MB or 200,000 lines, and binary files, get a byte
+comparison. Tests: `TextDiffTests.cpp` (12 cases), Config/KeyMap/MenuBar (+1 each), contrast test (+4 fields).
+**Primary platform:** Windows 10/11
+
 **Possible later platform:** Linux  
 **Application type:** Text-based terminal file manager  
 
@@ -694,8 +1382,10 @@ Priority and disposition are independent. A high-priority feature may still be p
 | UI-010 | The user shall be able to choose a color theme, including a high-contrast theme. | P2 | IN-MVP | Implemented |
 | UI-011 | The interface shall correctly render Unicode text supported by the active terminal and font. | P0 | IN-MVP | Implemented |
 | UI-012 | Mouse selection, scrolling, and activation may be supported without being required. | P3 | IN-MVP | Implemented |
-| UI-013 | A single-panel and a directory-tree layout may be provided in addition to dual-pane mode. | P3 | LATER | Not Started |
+| UI-013 | A single-panel and a directory-tree layout may be provided in addition to dual-pane mode: the active panel can show a lazily-loaded directory tree of its drive/share (Part B, `Ctrl+T` / `View` → `Tree`), and the active panel can be shown alone at full width while the hidden panel keeps its state and stays the "other panel" target (Part A, `Ctrl+F1` / `View` → `Single panel`, remembered in the session file). | P3 | IN-MVP | Implemented |
 | UI-014 | Panel separators/borders and dialog boxes shall use the IBM PC/CP437 Unicode box-drawing character set (single-line `─│┌┐└┘├┤┬┴┼`, U+2500 range; see `AIPrompt/ascii_pc_frame_characters.md`) as the default frame style; the plain 7-bit ASCII fallback (`+`, `-`, `|`) remains available as ACC-006's basic-symbol mode for fonts/terminals lacking box-drawing glyphs. | P1 | IN-MVP | Implemented |
+| UI-015 | The terminal window/tab title shall identify the running application and its version. | P3 | IN-MVP | Implemented |
+| UI-016 | Every single-line text-editing surface (the internal command line, the text-prompt dialog, and form-dialog text fields) shall provide a real positionable cursor — insert at point, Backspace, forward-Delete, and Left/Right/Home/End movement — rather than append-at-the-end-only editing. The cursor shall be clearly visible on every surface it is drawn on, and text wider than its field shall scroll horizontally so the cursor always stays on screen (IS-0016). | P2 | IN-MVP | Implemented |
 
 ## 7. Navigation Requirements
 
@@ -707,10 +1397,12 @@ Priority and disposition are independent. A high-priority feature may still be p
 | NAV-004 | The application shall provide drive selection on Windows. | P0 | IN-MVP | Implemented |
 | NAV-005 | Each panel shall retain independent path, cursor, sorting, and selection state. | P0 | IN-MVP | Implemented |
 | NAV-006 | Navigation history shall support backward and forward movement. | P1 | IN-MVP | Implemented |
-| NAV-007 | The user shall be able to create named favorite locations. | P2 | LATER | Not Started |
+| NAV-007 | The user shall be able to create named favorite locations (directory hotlist, `Ctrl+D`), stored per user. | P2 | IN-MVP | Implemented |
 | NAV-008 | The application shall restore panel locations from the previous normal exit. | P1 | IN-MVP | Implemented |
 | NAV-009 | Symbolic links, junctions, and reparse points shall be identified and handled without accidental traversal loops. | P1 | IN-MVP | Implemented |
 | NAV-010 | Hidden and system files shall be optionally visible. | P1 | IN-MVP | Implemented |
+| NAV-011 | The user shall be able to manually refresh (re-read) the active panel via a dedicated shortcut, including a plugin's own panel content. | P2 | IN-MVP | Implemented |
+| NAV-012 | When both panels show the same directory, an operation performed via one panel shall keep the other synchronized automatically rather than leaving it stale. | P2 | IN-MVP | Implemented |
 
 ## 8. File Listing and Sorting
 
@@ -735,6 +1427,7 @@ Priority and disposition are independent. A high-priority feature may still be p
 | SEL-004 | Operations shall act on selected entries, or on the cursor entry when nothing is selected. | P0 | IN-MVP | Implemented |
 | SEL-005 | The interface shall display the selected item count and total selected size. | P1 | IN-MVP | Implemented |
 | SEL-006 | Regular-expression and attribute-based selection may be added later. | P3 | LATER | Not Started |
+| SEL-007 | Shift+Up/Shift+Down shall toggle selection on each entry as the cursor moves over it, symmetrically reversible (retracing the same entries toggles them back off), rather than only toggling a single entry at a time. | P2 | IN-MVP | Implemented |
 
 ## 10. File Operation Requirements
 
@@ -753,11 +1446,12 @@ Priority and disposition are independent. A high-priority feature may still be p
 | FOP-011 | A failed multi-file operation shall report completed, skipped, and failed items. | P0 | IN-MVP | Implemented |
 | FOP-012 | The user shall be able to cancel a long-running operation safely. | P0 | IN-MVP | Implemented |
 | FOP-013 | Operations should preserve applicable timestamps and attributes. | P1 | IN-MVP | Implemented |
-| FOP-014 | The application may support queued and background file operations. | P2 | LATER | Not Started |
+| FOP-014 | The application may support queued and background file operations (copy, move and delete); jobs and synchronous operations shall never act on the same files at the same time. Pause/resume is `FOP-015`. | P2 | IN-MVP | Implemented |
 | FOP-015 | The application may pause and resume supported long-running operations. | P2 | LATER | Not Started |
 | FOP-016 | Secure file deletion shall not be part of the MVP. | P3 | POSTPONE | N/A |
-| FOP-017 | Multi-rename with patterns, counters, and preview may be provided later. | P2 | LATER | Not Started |
+| FOP-017 | Multi-rename with patterns, counters, and preview (group rename, `Ctrl+M`): name/extension masks, search/replace, case conversion, a preview that blocks invalid, duplicate or clashing names, and swap-safe execution. | P2 | IN-MVP | Implemented |
 | FOP-018 | File splitting and recombination may be provided later. | P3 | LATER | Not Started |
+| FOP-019 | The user shall be able to copy one entry under a new name (`Shift+F5`): a bare name or relative path is resolved against the source directory, so the copy lands beside the original; a full path is used as given; an existing directory, or input ending in a path separator, receives the copy under its original name. Copying an item onto itself shall be refused, never offered as an overwrite. | P1 | IN-MVP | Implemented |
 
 ## 11. View, Edit, and Execute Requirements
 
@@ -767,11 +1461,15 @@ Priority and disposition are independent. A high-priority feature may still be p
 | VEE-002 | Pressing Enter on a file shall use a configurable default action. | P0 | IN-MVP | Implemented |
 | VEE-003 | The application shall provide or invoke a text viewer for files. | P1 | IN-MVP | Implemented |
 | VEE-004 | The viewer shall support text search, line navigation, encoding detection or selection, and large-file handling. | P1 | IN-MVP | Implemented |
-| VEE-005 | Hexadecimal viewing may be supported. | P2 | LATER | Not Started |
+| VEE-005 | Hexadecimal viewing may be supported: the built-in viewer offers a hex view with selectable items per row (8, 16, 32, or fit to the window), a cursor (shown in both the hex and ASCII columns) whose position is reported as the offset, and ASCII and hex-byte search. | P2 | IN-MVP | Implemented |
 | VEE-006 | Editing shall initially invoke a configured external editor. | P1 | IN-MVP | Implemented |
 | VEE-007 | A built-in text editor may be developed later. | P2 | LATER | Not Started |
 | VEE-008 | Executable files and scripts shall run only after an explicit user action. | P0 | IN-MVP | Implemented |
-| VEE-009 | File associations shall be configurable by extension or pattern. | P2 | LATER | Not Started |
+| VEE-009 | File associations shall be configurable by extension or pattern. | P2 | IN-MVP | Implemented |
+| VEE-010 | Each extension/pattern shall support several registered actions of at least two types — View and Open — with one marked as the default per type; the first matching block (in file order) that has an action of the needed type decides, its `*`-marked action — else its first — being the default; F3 runs the default View action, Shift+Enter the default Open action, and Shift+F3 lets the user choose any registered action. The action-type registry shall be extensible, and unknown types in the file shall be skipped with a warning rather than fail (FEA-0009). | P2 | IN-MVP | Implemented |
+| VEE-011 | An action's command-line arguments shall support placeholders for the selected file (%f full path, %n name, %b name without extension, %e extension, %d directory, %% literal), appending the quoted full path automatically when no file placeholder is given (FEA-0009). | P2 | IN-MVP | Implemented |
+| VEE-012 | With no registered action, View shall fall back to the built-in viewer and Open to the operating system's file association (FEA-0009). | P2 | IN-MVP | Implemented |
+| VEE-013 | File > Assign File to App shall list, add, remove, and set the default action for the cursor file's extension from inside the application, editing only the affected lines of the actions file (FEA-0009). | P3 | IN-MVP | Implemented |
 
 ## 12. Search, Filter, and Comparison
 
@@ -780,20 +1478,27 @@ Priority and disposition are independent. A high-priority feature may still be p
 | SRC-001 | The user shall be able to search recursively by filename or wildcard. | P1 | IN-MVP | Implemented |
 | SRC-002 | Search results shall be navigable and openable in a panel or viewer. | P1 | IN-MVP | Implemented |
 | SRC-003 | The user shall be able to filter the visible panel by name or wildcard. | P1 | IN-MVP | Implemented |
-| SRC-004 | Content search shall support plain text. | P2 | LATER | Not Started |
-| SRC-005 | Content search may support regular expressions and encoding options. | P2 | LATER | Not Started |
-| SRC-006 | The application may compare directories by name, size, timestamp, or checksum. | P2 | LATER | Not Started |
-| SRC-007 | Directory synchronization shall require preview and explicit confirmation. | P3 | LATER | Not Started |
-| SRC-008 | A text-file difference viewer may be integrated later. | P3 | LATER | Not Started |
+| SRC-004 | Content search shall support plain text. | P2 | IN-MVP | Implemented |
+| SRC-005 | Content search may support regular expressions and encoding options. | P2 | IN-MVP | Implemented |
+| SRC-006 | The application may compare directories by name, size, timestamp, or checksum. | P2 | IN-MVP | Implemented |
+| SRC-007 | Directory synchronization shall require preview and explicit confirmation. | P3 | IN-MVP | Implemented |
+| SRC-008 | A text-file difference viewer shall show two files side by side (or unified) with line- and character-level differences, optional case- and whitespace-insensitive comparison, and a byte comparison for binary or very large files; opened from File → Compare contents (`Alt+F3`) and the folder-compare results (`AIPrompt/features/SRC-008-plan.md`). An external tool may replace it via `diffProgram`. | P3 | IN-MVP | Implemented |
+| SRC-008a | The difference viewer may later support merging: copying a difference block to the other side, editing, and saving. | P3 | LATER | Not Started |
 
 ## 13. Archive Requirements
 
 | ID | Requirement | Priority | Disposition | Implemented |
 |---|---|---:|---|---|
-| ARC-001 | ZIP archives should be browsable as virtual directories. | P2 | LATER | Not Started |
-| ARC-002 | The user should be able to create and extract ZIP archives. | P2 | LATER | Not Started |
-| ARC-003 | Additional archive types shall use an extensible provider mechanism. | P3 | LATER | Not Started |
+| ARC-001 | ZIP archives should be browsable as virtual directories. | P2 | IN-MVP | Implemented |
+| ARC-002 | The user should be able to create and extract ZIP archives. | P2 | IN-MVP | Implemented |
+| ARC-003 | Additional archive types shall use an extensible provider mechanism. | P3 | IN-MVP | Implemented |
 | ARC-004 | Password-protected archive support shall not expose passwords in logs or command histories. | P2 | LATER | Not Started |
+
+ARC-001..003 are delivered by the ZIP MC Plugin (FEA-0007; see §ZIP below and `AIPrompt/features/ARC-001-plan.md`):
+browsing is `ZIP-005`/`006`/`007`/`009`/`010`/`011`; creating and extracting is `ZIP-001`..`004` plus extraction from
+the browser; the provider mechanism is the plugin SDK's `kMcPluginCapArchiveHandler` (`McPlugin_CanHandleFile` /
+`McPlugin_EnterArchive` + panel content), through which any plugin can claim further archive types. The installer
+ships the ZIP plugin (IS-0013). ARC-004 stays LATER because encrypted archives aren't supported at all (`ZIP-008`).
 
 ## 14. Command-Line and Shell Integration
 
@@ -815,7 +1520,7 @@ Priority and disposition are independent. A high-priority feature may still be p
 | KEY-002 | Default shortcuts should follow familiar commander-style conventions where practical. | P1 | IN-MVP | Implemented |
 | KEY-003 | `F3`, `F4`, `F5`, `F6`, `F7`, and `F8` should map to View, Edit, Copy, Move, New Directory, and Delete respectively. | P1 | IN-MVP | Implemented |
 | KEY-004 | The application shall provide an in-application shortcut reference. | P1 | IN-MVP | Implemented |
-| KEY-005 | Shortcut rebinding may be supported later through configuration. | P2 | LATER | Not Started |
+| KEY-005 | Shortcut rebinding may be supported later through configuration. | P2 | IN-MVP | Implemented |
 | KEY-006 | Invalid or unavailable key combinations shall fail safely and provide feedback when needed. | P1 | IN-MVP | Implemented |
 
 ## 16. Configuration Requirements
@@ -884,10 +1589,55 @@ Exact performance thresholds shall be refined after a prototype is benchmarked o
 |---|---|---:|---|---|
 | EXT-001 | Core UI, file-operation services, platform integration, and file-system providers should have defined boundaries. | P1 | IN-MVP | Implemented |
 | EXT-002 | Remote and virtual file systems should be representable through a common provider interface. | P2 | LATER | Not Started |
-| EXT-003 | A public plug-in API may later support viewers, archive handlers, file-system providers, and commands. | P3 | LATER | Not Started |
-| EXT-004 | SFTP support may be implemented as a remote file-system provider. | P3 | LATER | Not Started |
-| EXT-005 | FTP support may be implemented as a remote file-system provider. | P3 | LATER | Not Started |
+| EXT-003 | A public plug-in API may later support viewers, archive handlers, file-system providers, and commands (FEA-0002/MC Plugin, Section 26; FEA-0007/ZIP Plugin, Section 27, below). Commands: PLUG-004/008; archive handlers: `kMcPluginCapArchiveHandler` (ZIP); file-system providers: panel content + `OnReceiveFiles` (ZIP, FTP — a *common* provider interface is EXT-002); viewers: PLUG-014 (`AIPrompt/features/EXT-003-plan.md`). | P3 | IN-MVP | Implemented |
+| EXT-004 | SFTP support may be implemented as a remote file-system provider — delivered as a standalone MC Plugin (`Source/SftpPlugin/`, sharing the FTP plugin's remote panel via `Source/PluginCommon/`), detailed in §21.2 (`SFTP-001`…`SFTP-011`) and `AIPrompt/features/EXT-004-plan.md`. | P3 | IN-MVP | Implemented |
+| EXT-005 | FTP support may be implemented as a remote file-system provider — delivered as a standalone MC Plugin (`Source/FtpPlugin/`), detailed in §21.1 (`FTP-001`…`FTP-012`) and `AIPrompt/features/EXT-005-plan.md`. | P3 | IN-MVP | Implemented |
 | EXT-006 | Cloud providers may be implemented through optional extensions. | P3 | LATER | Not Started |
+
+### 21.1 FTP Plugin Requirements (EXT-005)
+
+Decided 2026-10-08: EXT-005 is delivered as a standalone MC Plugin (`Source/FtpPlugin/`, outside `MyCommander.sln`,
+built on FEA-0002's plugin architecture and bundled by the installer), following the ZIP plugin's model (§27).
+Design and phasing: `AIPrompt/features/EXT-005-plan.md`. Decided: DEC-012 (own minimal Winsock FTP client) and
+DEC-013 (saved passwords only in the Windows Credential Manager, opt-in), §31. All three phases are implemented
+(host 1.23.0, FtpPlugin 0.1.0); FTP-011 stays LATER.
+
+| ID | Requirement | Priority | Disposition | Implemented |
+|---|---|---:|---|---|
+| FTP-001 | An FTP plugin shall provide Network → "FTP connection" (a manager for saved connections: connect, add, edit, delete, quick connect) and "New FTP connection" (the connection form), replacing the application's own built-in stubs, plus — shown only while a panel is connected — "Disconnect FTP". | P3 | IN-MVP | Implemented |
+| FTP-002 | A connected server shall be shown in the active panel as a navigable remote directory (folders first; name, size, date, permissions), with selection like any panel; navigating out of the server's root shall ask to disconnect first. | P3 | IN-MVP | Implemented |
+| FTP-003 | The user shall be able to download the selection (files and folders, recursively) to the other panel's directory (F5) and to download-then-delete it (F6), with progress, Esc cancellation and overwrite/skip/rename/all choices; a failed or cancelled download shall never leave a partial file or destroy an existing local file. | P3 | IN-MVP | Implemented |
+| FTP-004 | The user shall be able to upload the other panel's selection (files and folders, recursively) into the current server folder (F5 from that panel), with progress, Esc cancellation and conflict choices. | P3 | IN-MVP | Implemented |
+| FTP-005 | While connected, the panel shall support creating a folder (F7), deleting (F8/Delete, always confirmed, recursive), renaming (F2), re-listing (Ctrl+R) and viewing a file (F3, through a temporary download that is removed afterwards). | P3 | IN-MVP | Implemented |
+| FTP-006 | FTP passwords shall never be shown on screen, written to logs, the command history, or the connections file; they shall be kept only in memory for the session, or — only when the user opts in — in the Windows Credential Manager. Every FTP password entry (the connection form and each login password prompt) shall offer that opt-in. The connection form shall state that plain FTP sends the password unencrypted. | P2 | IN-MVP | Implemented |
+| FTP-007 | Saved connections shall be stored in `%APPDATA%\MyCommander\ftp-connections.conf` (DEC-007-style text, UTF-8, no secrets). | P3 | IN-MVP | Implemented |
+| FTP-008 | The plugin shall use passive mode by default (EPSV, then PASV), with active mode optional; transfer in binary mode; use UTF-8 file names when the server supports them; and list folders with MLSD when available, otherwise by parsing the Unix and Windows LIST formats. | P3 | IN-MVP | Implemented |
+| FTP-009 | Connection timeouts, login failures, refused data connections and dropped connections shall fail safely with the server's message, shall never freeze or crash the application (every wait bounded, Esc honored), and a dropped connection shall offer to reconnect (ERR-001/002). | P2 | IN-MVP | Implemented |
+| FTP-010 | The plugin SDK's form dialog shall offer a masked password field (`kMcFormFieldPassword`, plugin API 1.9), whose characters are never drawn on screen. | P3 | IN-MVP | Implemented |
+| FTP-011 | FTPS (explicit TLS), resuming interrupted transfers, changing remote permissions, background (queued) transfers, and folder compare/sync against a server panel are useful extensions not required for the initial release. | P3 | LATER | Not Started |
+| FTP-012 | The installer shall bundle and install the FTP plugin, the same way as the ZIP plugin (INST-007). | P3 | IN-MVP | Implemented |
+
+### 21.2 SFTP Plugin Requirements (EXT-004)
+
+Decided 2026-10-09: EXT-004 is delivered as a standalone MC Plugin (`Source/SftpPlugin/`, outside `MyCommander.sln`,
+bundled by the installer), sharing the FTP plugin's remote panel through `Source/PluginCommon/` (each plugin compiles
+it in; no ABI between plugins). Design and phasing: `AIPrompt/features/EXT-004-plan.md`. Decided: DEC-014 (vendored
+libssh2 with Windows CNG) and DEC-015 (host-key trust), §31. Implemented in host 1.25.0, SftpPlugin 0.1.0;
+SFTP-011 stays LATER.
+
+| ID | Requirement | Priority | Disposition | Implemented |
+|---|---|---:|---|---|
+| SFTP-001 | An SFTP plugin shall provide Network → "SFTP connection" (a manager for saved connections: connect, edit, delete, new), "New SFTP connection" (the connection form) and — shown only while a panel is connected — "Disconnect SFTP". | P3 | IN-MVP | Implemented |
+| SFTP-002 | A connected server shall be shown in the active panel as a navigable remote directory (folders first; name, size, date, Unix permissions), with selection like any panel; navigating out of the server's root shall ask to disconnect first. | P3 | IN-MVP | Implemented |
+| SFTP-003 | Download (F5, F6 download-then-delete) to the other panel and upload (F5 from the other panel), recursive, with progress, Esc cancellation and overwrite/skip/rename/all choices; a failed or cancelled download shall never leave a partial file or destroy an existing local file. A symbolic link to a folder shall never be descended into when copying or deleting (deleting removes the link only). | P3 | IN-MVP | Implemented |
+| SFTP-004 | While connected, the panel shall support F7 (create folder), F8/Delete (always confirmed, recursive), F2 (rename, never overwriting), Ctrl+R (re-list) and F3 (view through a temporary download that is removed afterwards). | P3 | IN-MVP | Implemented |
+| SFTP-005 | Logging in shall support a password (also answered to keyboard-interactive password prompts; other prompts are asked masked), a private key file with optional passphrase (the formats the built-in SSH library supports, with an explanation and an alternative for the others), and the SSH agent (Windows OpenSSH agent or Pageant). | P3 | IN-MVP | Implemented |
+| SFTP-006 | Passwords and key passphrases shall never be shown on screen, written to logs or the connections file; they shall be kept only in memory for the session, or — only when the user opts in — in the Windows Credential Manager (`MyCommander/SFTP/<name>`), offered at every password/passphrase entry. | P2 | IN-MVP | Implemented |
+| SFTP-007 | The server's host key shall be verified against MyCommander's `%APPDATA%\MyCommander\known_hosts` and the user's OpenSSH `%USERPROFILE%\.ssh\known_hosts` (read only). An unknown key shall be accepted only after the user sees its SHA-256 fingerprint (trust and remember, once, or cancel); a changed key shall refuse the connection, name the file and line of the old key, and offer no way to connect anyway. | P1 | IN-MVP | Implemented |
+| SFTP-008 | Every network wait shall be bounded by the connection's timeout and honor Esc; failures shall report the server's reason and never freeze or crash the application; a dropped connection shall offer to reconnect (ERR-001/002). | P2 | IN-MVP | Implemented |
+| SFTP-009 | Saved connections shall be stored in `%APPDATA%\MyCommander\sftp-connections.conf` (DEC-007-style text, UTF-8, no secrets; `auth` and `key-file` keys). | P3 | IN-MVP | Implemented |
+| SFTP-010 | The installer shall bundle and install the SFTP plugin, the same way as the ZIP and FTP plugins (INST-007). | P3 | IN-MVP | Implemented |
+| SFTP-011 | Changing remote permissions, resuming interrupted transfers, background (queued) transfers, server-to-server copy, Ed25519/OpenSSH-format key files without the agent, `~/.ssh/config`, jump hosts and port forwarding are useful extensions not required for the initial release. | P3 | LATER | Not Started |
 
 ## 22. Testing and Quality Requirements
 
@@ -911,8 +1661,74 @@ Exact performance thresholds shall be refined after a prototype is benchmarked o
 | INST-004 | The installer shall create a desktop shortcut to the installed application. | P2 | IN-MVP | Implemented |
 | INST-005 | The installer shall register the installed application with Windows ("Apps & Features") with a working uninstall path that removes the installed files, the desktop shortcut, and the registration itself. | P2 | IN-MVP | Implemented |
 | INST-006 | Every build of the installer shall embed a freshly rebuilt Release build of the application, never a stale or Debug build, regardless of which configuration the installer itself is built in. | P3 | IN-MVP | Implemented |
+| INST-007 | The installer shall bundle and install the implemented, user-facing plugins (not developer-facing example/template plugins), rebuilt freshly the same way as the application itself; a failed plugin build shall warn rather than block installing the core application. | P3 | IN-MVP | Implemented |
 
-## 24. Proposed MVP
+## 24. Menu Bar Requirements
+
+| ID | Requirement | Priority | Disposition | Implemented |
+|---|---|---:|---|---|
+| MENU-001 | The application shall provide an always-visible top menu bar (`File Selection Commands Network View Settings`), opened via `Alt+<mnemonic>` and fully mouse-clickable, without ever becoming the only way to reach any action it exposes (KEY-001). | P2 | IN-MVP | Implemented |
+| MENU-002 | Every menu item that already has an existing keyboard shortcut shall invoke that exact same action, not a second, independent implementation. | P2 | IN-MVP | Implemented |
+| MENU-003 | A menu item naming a feature the application doesn't implement yet shall clearly indicate that ("Not yet implemented") rather than silently doing nothing or claiming to work. | P2 | IN-MVP | Implemented |
+| MENU-004 | The color theme (`colorTheme`) shall be toggleable from the Settings menu, persisting the change to the config file and applying it live. | P3 | IN-MVP | Implemented |
+
+## 25. File Properties Requirements
+
+| ID | Requirement | Priority | Disposition | Implemented |
+|---|---|---:|---|---|
+| PROP-001 | The application shall show a file properties view (`Alt+Enter`, also reachable from the View menu's "Executable properties" item) for the panel cursor's file entry, with general fields (file name, size, last modification time) always shown. | P2 | IN-MVP | Implemented |
+| PROP-002 | For a runnable file (a PE file type that can carry an embedded VERSIONINFO resource: `.exe`/`.dll`/`.ocx`/`.sys`/`.cpl`/`.scr`/`.drv`), the properties view shall show the file's embedded version info (description, file version, product name, product version, copyright) when present. | P2 | IN-MVP | Implemented |
+| PROP-003 | For a runnable file, the properties view shall show a best-effort digital-signature check: not signed, or signed with a short signer name where available — covering both embedded (Authenticode) and catalog-based signatures, not embedded signatures only. | P2 | IN-MVP | Implemented |
+| PROP-004 | The digital-signature check shall never require administrator privileges (SEC-002) and shall never crash or block the application if the check itself fails. | P1 | IN-MVP | Implemented |
+
+## 26. MC Plugin Requirements
+
+FEA-0002 (`AIPrompt/additional_feature_requests.md`), designed in `AIPrompt/features/FEA-0002-plan.md`
+and delivered in three phases (see that plan for the full architecture and phasing rationale).
+All three phases are implemented: Phase 1 (PLUG-001–010), Phase 2 (help integration, PLUG-011),
+and Phase 3 (panel content and inter-plugin services, PLUG-012/013).
+
+| ID | Requirement | Priority | Disposition | Implemented |
+|---|---|---:|---|---|
+| PLUG-001 | The application shall discover and identify MC Plugin DLLs in a `Plugins` folder next to the executable, distinguishing them from unrelated DLLs via a required export and magic constant, without requiring administrator privileges. | P2 | IN-MVP | Implemented |
+| PLUG-002 | Every MC Plugin shall declare an id, name, description, version, plugin API version, author, and capability set, readable by the application before the plugin is activated. | P2 | IN-MVP | Implemented |
+| PLUG-003 | The application shall drive every plugin through a defined lifecycle (discovery, validation, loading, initialization, activation, deactivation, shutdown, unloading), and shall itself remove every menu item and keyboard shortcut a plugin registered when that plugin unloads, rather than relying on the plugin's own cleanup. | P2 | IN-MVP | Implemented |
+| PLUG-004 | A plugin shall be able to add, remove, and enable/disable items in the application's built-in menu bar (MENU-001), scoped so a plugin can only ever address its own items. | P2 | IN-MVP | Implemented |
+| PLUG-005 | A plugin shall be able to display the application's own choice, message, and text-prompt dialogs, matching the application's visual conventions. | P2 | IN-MVP | Implemented |
+| PLUG-006 | A plugin shall be able to write to the application's diagnostic log (ERR-004), with each line identified by the plugin that produced it, without implementing its own logging. | P2 | IN-MVP | Implemented |
+| PLUG-007 | A plugin shall be able to read the application's current color theme and be notified when the user changes it. | P3 | IN-MVP | Implemented |
+| PLUG-008 | A plugin shall be able to register and unregister keyboard shortcuts; the application shall reject a registration that conflicts with a built-in shortcut or one already held by another plugin, rather than allowing two commands to contend for one key press. | P2 | IN-MVP | Implemented |
+| PLUG-009 | A structured-exception failure while the application is calling into a plugin shall be caught and logged, and shall not terminate the application or affect other plugins — understood as a best-effort guarantee (structured exceptions only, not every possible failure mode of in-process third-party code), not absolute process isolation. | P2 | IN-MVP | Implemented |
+| PLUG-010 | The user shall be able to disable a specific plugin by id via the configuration file, without needing to remove or move its DLL. | P3 | IN-MVP | Implemented |
+| PLUG-011 | A plugin shall be able to provide Markdown-format help content, dynamically and identifiably merged into the application's own shortcut reference (KEY-004). | P3 | IN-MVP | Implemented |
+| PLUG-012 | A plugin shall be able to draw and handle user interaction with content in either main panel. | P3 | IN-MVP | Implemented |
+| PLUG-013 | A plugin shall be able to publish and discover services through the application, enabling communication between two independently loaded plugins without one linking directly against the other's DLL. | P3 | IN-MVP | Implemented |
+| PLUG-014 | A plugin shall be able to act as a file viewer: claim files by name (offered in the view-action chooser, or also as F3's default), and render a file as text that the application shows in its own viewer; the user's own file-actions configuration shall always take precedence over a plugin's default claim, and a failed or missing viewer plugin shall fall back to the built-in viewer with feedback (EXT-003). | P3 | IN-MVP | Implemented |
+
+## 27. ZIP Archive Requirements
+
+FEA-0007 (`AIPrompt/additional_feature_requests.md`), designed in
+`AIPrompt/features/FEA-0007-plan.md` and delivered as a standalone MC Plugin
+(`Source/ZipPlugin/`, built on FEA-0002's plugin architecture) rather than a
+built-in feature, in three phases (see that plan for the full architecture
+and phasing rationale). Phase 1 (packing, ZIP-001/002/003) and Phase 2 (unpacking, ZIP-004) are
+implemented; Phase 3 (live archive browsing, ZIP-005/006/007) is implemented.
+
+| ID | Requirement | Priority | Disposition | Implemented |
+|---|---|---:|---|---|
+| ZIP-001 | A ZIP plugin shall provide a "Pack file" command on the File menu, replacing the application's own built-in stub. | P2 | IN-MVP | Implemented |
+| ZIP-002 | The pack command shall offer a dialog with compression level, include-subdirectories (default on), a maximum archive size, and multi-archive splitting options. | P2 | IN-MVP | Implemented |
+| ZIP-003 | Every packed entry shall retain its own Win32 file attributes, readable back on unpack. | P2 | IN-MVP | Implemented |
+| ZIP-004 | A ZIP plugin shall provide an "Unpack Package" command on the File menu, replacing the application's own built-in stub. | P2 | IN-MVP | Implemented |
+| ZIP-005 | Pressing Enter on a `.zip` file shall step into it as a navigable, panel-rendered virtual directory. | P2 | IN-MVP | Implemented |
+| ZIP-006 | While browsing an archive, the panel shall support selection, deletion, extraction to the other panel, and adding the other panel's selection into the archive. | P2 | IN-MVP | Implemented |
+| ZIP-007 | Navigating out of an archive's own root level (back to the real file system) shall ask for confirmation first. | P3 | IN-MVP | Implemented |
+| ZIP-008 | Nested archive browsing, password/encrypted archives, and an archive integrity check are useful extensions not required for the initial release. | P3 | LATER | Not Started |
+| ZIP-009 | While browsing an archive, the panel shall support creating a new, persisted directory and reloading the archive's contents from disk. | P2 | IN-MVP | Implemented |
+| ZIP-010 | Archive edits shall be batched in memory and written to disk only when the user leaves the archive (with a save/discard/cancel confirmation if anything is pending), not repacked on every individual edit. | P2 | IN-MVP | Implemented |
+| ZIP-011 | While browsing an archive, `Shift+F5` shall copy the cursor entry (file or folder) under a new name or relative path inside the archive, deferred like other archive edits (`ZIP-010`); input that would leave the archive shall be refused (FEA-0008). | P2 | IN-MVP | Implemented |
+
+## 28. Proposed MVP
 
 The first usable release should include:
 
@@ -928,25 +1744,24 @@ The first usable release should include:
 10. Persistent configuration and previous panel locations.
 11. Diagnostic logging and automated tests for critical file operations.
 
-## 25. Recommended Postponement Candidates
+## 29. Recommended Postponement Candidates
 
 These features are useful but can be postponed with limited impact on the core product:
 
 | Candidate | Related IDs | Reason to postpone |
 |---|---|---|
-| Favorites | NAV-007 | History and direct path entry cover the initial need. |
+| Favorites | NAV-007 | History and direct path entry cover the initial need. (Implemented in 1.16.0 — no longer postponed.) |
 | Background monitoring | LIST-007 | Manual refresh is sufficient initially. |
-| Queued and resumable operations | FOP-014, FOP-015, ERR-007 | Adds concurrency and recovery complexity. |
-| Multi-rename and file splitting | FOP-017, FOP-018 | Specialized workflows. |
-| Hex viewer and built-in editor | VEE-005, VEE-007 | External tools provide an early solution. |
-| Content search and comparison | SRC-004 to SRC-008 | Valuable but not required for basic file management. |
-| Archive browsing | ARC-001 to ARC-004 | Requires virtual file-system and archive abstractions. |
-| Shortcut customization | KEY-005 | A stable default key map is enough for MVP. |
+| Resumable operations | FOP-015, ERR-007 | Pause/resume and crash recovery add complexity; queued background jobs are in FOP-014. |
+| Multi-rename and file splitting | FOP-017, FOP-018 | Specialized workflows. (FOP-017 implemented in 1.18.0; FOP-018 still later.) |
+| Built-in editor | VEE-007 | External tools provide an early solution. |
+| Content search and comparison | SRC-004 to SRC-008 | Valuable but not required for basic file management. (SRC-004/005 implemented in 1.19.0, SRC-006 in 1.20.0, SRC-007 in 1.21.0, SRC-008 in 1.27.0; merging, SRC-008a, still later.) |
+| Shortcut customization | KEY-005 | A stable default key map is enough for MVP. (Implemented in 1.22.0.) |
 | Portable mode | CFG-006 | Per-user configuration is sufficient initially. |
 | Localization | ACC-005 | English can be used while strings remain localization-ready. |
-| Plug-ins and remote systems | EXT-002 to EXT-006 | Should follow stabilization of the local provider interface. |
+| Plug-ins and remote systems | EXT-002 to EXT-006 | Should follow stabilization of the local provider interface. (EXT-005 implemented in 1.23.0 as the FTP MC Plugin, §21.1; EXT-004 in 1.25.0 as the SFTP MC Plugin, §21.2; FTPS still later.) |
 
-## 26. Postponement Register
+## 30. Postponement Register
 
 When postponing a feature, keep its original requirement and add a row below. This preserves intent and provides an auditable reason for the change.
 
@@ -955,7 +1770,7 @@ When postponing a feature, keep its original requirement and add a row below. Th
 | FOP-016 | Secure deletion | LATER | POSTPONE | Unscheduled | Platform-specific behavior and limited MVP value | None for core file operations | Initial draft |
 | _Example: ARC-001_ | _Browse ZIP archives_ | _LATER_ | _POSTPONE_ | _v2_ | _Reduce first-release scope_ | _Archive provider postponed_ | _YYYY-MM-DD_ |
 
-## 27. Open Decisions
+## 31. Open Decisions
 
 | ID | Decision | Options | Recommended starting point | Status |
 |---|---|---|---|---|
@@ -968,8 +1783,14 @@ When postponing a feature, keep its original requirement and add a row below. Th
 | DEC-007 | Configuration format | TOML, JSON, YAML, other | TOML or JSON | DECIDED: a minimal hand-rolled "key = value" plain-text format (`#`/`;` comments), consistent with DEC-002's no-third-party-library stance — no TOML/JSON/YAML parser dependency needed for the small, flat settings this app has (2026-09-21) |
 | DEC-008 | Licensing | Proprietary or open source | Decide before accepting outside contributions | DECIDED: MIT (open source) (2026-09-20) |
 | DEC-009 | Build system / toolchain | Native VS solution (.sln/.vcxproj), CMake | Prototype with the installed VS toolset first | DECIDED: native VS 2022 Professional solution (MSBuild, v143 toolset, C++20, Windows SDK 10.0.26100.0) (2026-09-20) |
+| DEC-010 | ZIP/DEFLATE implementation | Hand-rolled DEFLATE; vendor a small, permissively-licensed library (miniz) | Vendor miniz (single `.c`/`.h`, MIT-licensed) | DECIDED: vendored miniz 3.1.2 (MIT) into `Source/ZipPlugin/third_party/miniz/`, compiled directly into the standalone ZIP plugin project — this project's first vendored third-party source (2026-10-01) |
+| DEC-011 | File-actions storage (FEA-0009) | New keys in `mycommander.ini`; a separate file | A separate file — the data is a list of multi-field records, which the config file's one-line-per-key machinery doesn't fit | DECIDED: `%APPDATA%\MyCommander\file-actions.conf`, hand-rolled DEC-007-style text — `[patterns]` blocks, one `type[*] = description \| program \| arguments` line per action, `#`/`;` comments, UTF-8; reloaded lazily when its timestamp/size changes (2026-10-05) |
+| DEC-012 | FTP protocol implementation (EXT-005, FTP plugin) | WinINet's FTP API; an own minimal FTP client on Winsock2 inside the plugin | Own client on Winsock2: UTF-8 names (`OPTS UTF8`), Esc and timeouts mid-transfer, MLSD, and a path to FTPS via Schannel — WinINet converts names through the ANSI code page, can't be interrupted, and has no FTPS; neither option is third-party code | DECIDED: own minimal FTP client on Winsock2 in `Source/FtpPlugin/FtpClient.{h,cpp}` (2026-10-08) |
+| DEC-013 | Saved FTP passwords (EXT-005, FTP-006) | Never save; Windows Credential Manager (opt-in); own encrypted file | Windows Credential Manager, opt-in per connection (`CredWriteW`, generic credential, per-user DPAPI protection, no elevation) — never in `ftp-connections.conf` | DECIDED: Windows Credential Manager, opt-in per connection, target `MyCommander/FTP/<name>` (2026-10-08) |
+| DEC-014 | SSH/SFTP transport (EXT-004) | Vendor libssh2 (BSD-3-Clause) with the Windows CNG backend; drive Windows' `sftp.exe`/`ssh.exe`; an own SSH implementation | Vendor libssh2 with WinCNG (mbedTLS backend as the fallback): non-blocking sessions for Esc/timeouts, no OpenSSL — `sftp.exe` reads passwords from the console and needs an optional Windows feature; an own SSH stack is too large and security-critical | DECIDED: vendored libssh2 1.11.1 into `Source/SftpPlugin/third_party/libssh2/` with `LIBSSH2_WINCNG` + `LIBSSH2_ECDSA_WINCNG` (checked against a real server, no fallback needed); Ed25519/OpenSSH-format RSA key files go through the SSH agent (2026-10-09) |
+| DEC-015 | SSH host-key trust (EXT-004, SFTP-007) | Separate MyCommander store; also read the user's OpenSSH `known_hosts`; accept-new without asking | MyCommander's own `known_hosts` (OpenSSH format) plus the user's `%USERPROFILE%\.ssh\known_hosts` read-only; SHA-256 fingerprint confirmation on first use; a changed key refused with no override | DECIDED: as recommended; a mismatch in either file outranks a match in the other (2026-10-09) |
 
-## 28. Initial Acceptance Criteria
+## 32. Initial Acceptance Criteria
 
 The MVP is acceptable when all of the following are true:
 
@@ -984,7 +1805,7 @@ The MVP is acceptable when all of the following are true:
 9. Automated tests cover all critical file-operation and path-handling behavior.
 10. No known defect can cause silent data loss.
 
-## 29. Change Procedure
+## 33. Change Procedure
 
 For each planning revision:
 

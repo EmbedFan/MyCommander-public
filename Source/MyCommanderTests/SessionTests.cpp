@@ -40,3 +40,25 @@ TEST_CASE(Session_IgnoresMalformedAndIncompleteValues_NAV008) {
     if (loaded.leftPath) CHECK(*loaded.leftPath == std::filesystem::path(L"C:\\saved-left"));
     CHECK(!loaded.rightPath.has_value());
 }
+
+TEST_CASE(Session_RemembersTheSinglePanelLayout_UI013) {
+    test::TempDir directory;
+    const auto sessionPath = directory.Path() / L"session.ini";
+    SessionState saved{directory.Path() / L"l", directory.Path() / L"r", /*singlePanel=*/true};
+    CHECK(SaveSessionTo(sessionPath, saved));
+    CHECK(LoadSessionFrom(sessionPath).singlePanel);
+    saved.singlePanel = false;
+    CHECK(SaveSessionTo(sessionPath, saved));
+    CHECK(!LoadSessionFrom(sessionPath).singlePanel);
+}
+
+TEST_CASE(Session_OlderFileOrBadValueMeansDualPane_UI013) {
+    test::TempDir directory;
+    const auto sessionPath = directory.Path() / L"session.ini";
+    test::WriteFileContent(sessionPath, "leftPath = C:\\a\nrightPath = C:\\b\n");
+    CHECK(!LoadSessionFrom(sessionPath).singlePanel);
+    test::WriteFileContent(sessionPath, "leftPath = C:\\a\nrightPath = C:\\b\nsinglePanel = maybe\n");
+    CHECK(!LoadSessionFrom(sessionPath).singlePanel);
+    test::WriteFileContent(sessionPath, "singlePanel = YES\n");
+    CHECK(LoadSessionFrom(sessionPath).singlePanel);
+}

@@ -51,6 +51,11 @@ SessionState LoadSessionFrom(const std::filesystem::path& path) {
         if (value.empty()) continue;
         if (key == L"leftpath") state.leftPath = value;
         if (key == L"rightpath") state.rightPath = value;
+        if (key == L"singlepanel") {  // UI-013: anything but yes/no is ignored (dual-pane)
+            const std::wstring flag = ToLower(value);
+            if (flag == L"yes" || flag == L"true" || flag == L"1") state.singlePanel = true;
+            else if (flag == L"no" || flag == L"false" || flag == L"0") state.singlePanel = false;
+        }
     }
     return state;
 }
@@ -70,7 +75,8 @@ bool SaveSessionTo(const std::filesystem::path& path, const SessionState& state)
         if (!output) return false;
         output << L"# MyCommander clean-exit panel locations (NAV-008)\n"
                << L"leftPath = " << state.leftPath->wstring() << L"\n"
-               << L"rightPath = " << state.rightPath->wstring() << L"\n";
+               << L"rightPath = " << state.rightPath->wstring() << L"\n"
+               << L"singlePanel = " << (state.singlePanel ? L"yes" : L"no") << L"\n";
         if (!output) return false;
     }
 

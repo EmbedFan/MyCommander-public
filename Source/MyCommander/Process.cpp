@@ -99,4 +99,30 @@ DetachedProcessResult RunDetached(const std::wstring& exePath, const std::vector
     return result;
 }
 
+DetachedProcessResult RunDetachedCommandLine(const std::wstring& exePath, const std::wstring& rawArguments,
+                                             const std::filesystem::path& workingDirectory) {
+    DetachedProcessResult result;
+
+    std::wstring commandLine = QuoteCommandLineArgument(exePath);
+    if (!rawArguments.empty()) commandLine += L' ' + rawArguments;
+    std::vector<wchar_t> mutableCmd(commandLine.begin(), commandLine.end());
+    mutableCmd.push_back(L'\0');
+
+    STARTUPINFOW si{};
+    si.cb = sizeof(si);
+    PROCESS_INFORMATION pi{};
+    // No handle inheritance: a long-lived viewer/opener program has no use
+    // for this process's handles (change notifications, the log file, ...).
+    BOOL ok = CreateProcessW(nullptr, mutableCmd.data(), nullptr, nullptr, /*bInheritHandles=*/FALSE, 0, nullptr,
+                             workingDirectory.c_str(), &si, &pi);
+    if (!ok) {
+        result.error = FormatWinError(GetLastError());
+        return result;
+    }
+    CloseHandle(pi.hThread);
+    result.started = true;
+    result.processHandle = pi.hProcess;
+    return result;
+}
+
 } // namespace mc

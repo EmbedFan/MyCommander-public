@@ -5,6 +5,7 @@
 #endif
 #include <windows.h>
 
+#include <numeric>
 #include <string>
 
 namespace mc {
@@ -34,9 +35,7 @@ inline int CharDisplayWidth(wchar_t ch) {
 // column count, as opposed to std::wstring::size()'s UTF-16 code unit
 // count (the two differ for any full-width character).
 inline int StringDisplayWidth(const std::wstring& s) {
-    int total = 0;
-    for (wchar_t c : s) total += CharDisplayWidth(c);
-    return total;
+    return std::accumulate(s.begin(), s.end(), 0, [](int total, wchar_t c) { return total + CharDisplayWidth(c); });
 }
 
 // Trims `s` to at most `width` display columns — stopping before a wide

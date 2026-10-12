@@ -577,6 +577,107 @@ TEST_CASE(Panel_HugeDirectory_LoadsAllEntriesWithBoundedMemoryGrowth_PER003) {
     CHECK(grownBytes < 20ull * 1024 * 1024);
 }
 
+TEST_CASE(Panel_PreviewLocation_ChangesListingWithoutHistory) {
+    test::TempDir root;
+    fs::path first = root.Path() / L"first";
+    fs::path second = root.Path() / L"second";
+    fs::create_directories(first);
+    fs::create_directories(second);
+
+    Panel panel(first);
+    CHECK(!panel.CanNavigateBack());
+    panel.PreviewLocation(second);
+    CHECK(panel.Path() == second);
+    CHECK(!panel.CanNavigateBack());  // a preview leaves the user's history alone
+    panel.PreviewLocation(first);
+    CHECK(panel.Path() == first);
+    CHECK(!panel.CanNavigateBack());
+}
+
+// --- IS-0019: going up selects the folder just left ---------------------------
+
+namespace {
+std::wstring CursorName(const Panel& panel) {
+    const auto& entries = panel.Entries();
+    int c = panel.Cursor();
+    return c >= 0 && c < static_cast<int>(entries.size()) ? entries[c].name : L"";
+}
+
+void FinishLoading(Panel& panel) {
+    while (panel.IsLoading()) panel.PumpRefresh(4096);
+}
+}  // namespace
+
+TEST_CASE(Panel_GoToParent_SelectsTheFolderJustLeft_IS0019) {
+    test::TempDir root;
+    for (const wchar_t* name : {L"alpha", L"bravo", L"charlie", L"delta"}) fs::create_directories(root.Path() / name);
+    test::WriteFileContent(root.Path() / L"zz.txt", "x");
+
+    for (bool incremental : {false, true}) {
+        Panel panel(root.Path(), /*groupDirectoriesFirst=*/true, incremental);
+        FinishLoading(panel);
+        panel.NavigateTo(root.Path() / L"charlie");
+        FinishLoading(panel);
+        CHECK(CursorName(panel) == L"..");
+        panel.GoToParent();
+        FinishLoading(panel);
+        CHECK(panel.Path() == root.Path());
+        CHECK(CursorName(panel) == L"charlie");
+
+        // Enter on ".." takes the same path.
+        panel.NavigateTo(root.Path() / L"delta");
+        FinishLoading(panel);
+        panel.EnterSelected();  // cursor is on ".."
+        FinishLoading(panel);
+        CHECK(CursorName(panel) == L"delta");
+    }
+}
+
+TEST_CASE(Panel_BackToParentAndSeveralLevelsUp_IS0019) {
+    test::TempDir root;
+    fs::create_directories(root.Path() / L"bravo" / L"inner" / L"deep");
+    fs::create_directories(root.Path() / L"alpha");
+    test::WriteFileContent(root.Path() / L"a.txt", "x");
+
+    Panel panel(root.Path());
+    panel.NavigateTo(root.Path() / L"bravo");
+    CHECK(panel.NavigateBack());
+    CHECK(CursorName(panel) == L"bravo");
+
+    panel.NavigateTo(root.Path() / L"bravo" / L"inner" / L"deep");
+    panel.NavigateTo(root.Path());  // straight up three levels
+    CHECK(CursorName(panel) == L"bravo");
+
+    // An explicit name still wins.
+    panel.NavigateTo(root.Path() / L"alpha");
+    panel.NavigateTo(root.Path(), L"a.txt");
+    CHECK(CursorName(panel) == L"a.txt");
+
+    // A typed path in a different case still finds the folder.
+    std::wstring lower = (root.Path() / L"bravo").wstring();
+    std::transform(lower.begin(), lower.end(), lower.begin(), [](wchar_t c) { return static_cast<wchar_t>(std::towlower(c)); });
+    panel.NavigateTo(lower);
+    panel.GoToParent();
+    CHECK(CursorName(panel) == L"bravo");
+}
+
+TEST_CASE(Panel_GoToParent_ScrollsTheRestoredCursorIntoView_IS0019) {
+    test::TempDir root;
+    for (int i = 0; i < 100; ++i) {
+        wchar_t name[16];
+        swprintf_s(name, L"dir%03d", i);
+        fs::create_directories(root.Path() / name);
+    }
+    Panel panel(root.Path());
+    panel.MoveCursor(80, 10);  // ".." + dir000.. -> dir079; the panel now knows it shows 10 rows
+    CHECK(CursorName(panel) == L"dir079");
+    panel.EnterSelected();
+    panel.GoToParent();
+    CHECK(CursorName(panel) == L"dir079");
+    int cursor = panel.Cursor();
+    CHECK(panel.TopIndex() <= cursor && cursor < panel.TopIndex() + 10);
+}
+
 TEST_CASE(Panel_NavigationHistory_SupportsIndependentBackAndForward_NAV006) {
     test::TempDir root;
     fs::path first = root.Path() / L"first";
@@ -728,6 +829,85 @@ TEST_CASE(Panel_ToggleCursorSelection_NeverSelectsParentEntry_SEL001) {
 
     CHECK(panel.SelectedCount() == 0);
     CHECK(panel.Cursor() == 1);  // cursor still advances past it
+}
+
+TEST_CASE(Panel_ToggleSelectionAndMove_DownTogglesEachEntryPassedOver_SEL007) {
+    test::TempDir root;
+    test::WriteFileContent(root.Path() / L"afile.txt", "x");
+    test::WriteFileContent(root.Path() / L"bfile.txt", "x");
+    test::WriteFileContent(root.Path() / L"cfile.txt", "x");
+
+    Panel panel(root.Path());
+    panel.MoveCursor(1, 10);  // cursor -> afile.txt (index 1)
+
+    panel.ToggleSelectionAndMove(1, 10);  // toggles afile.txt, -> bfile.txt
+    panel.ToggleSelectionAndMove(1, 10);  // toggles bfile.txt, -> cfile.txt
+
+    CHECK(panel.Cursor() == 3);
+    CHECK(panel.Entries()[1].selected);
+    CHECK(panel.Entries()[2].selected);
+    CHECK(!panel.Entries()[3].selected);  // cfile.txt only ever entered, never toggled
+    CHECK(panel.SelectedCount() == 2);
+}
+
+// Regression test for the exact bug reported against the first version of
+// this feature: going Down N times then Up N times must return to *zero*
+// selected entries, including the entry the gesture started on -- not leave
+// one permanently stuck selected no matter how far you shrink back.
+TEST_CASE(Panel_ToggleSelectionAndMove_DownThenUpFullyRetraces_SEL007) {
+    test::TempDir root;
+    test::WriteFileContent(root.Path() / L"afile.txt", "x");
+    test::WriteFileContent(root.Path() / L"bfile.txt", "x");
+    test::WriteFileContent(root.Path() / L"cfile.txt", "x");
+
+    Panel panel(root.Path());
+    panel.MoveCursor(1, 10);  // cursor -> afile.txt (index 1), unselected
+
+    panel.ToggleSelectionAndMove(1, 10);  // -> bfile.txt; afile.txt selected
+    panel.ToggleSelectionAndMove(1, 10);  // -> cfile.txt; bfile.txt also selected
+    CHECK(panel.SelectedCount() == 2);
+
+    panel.ToggleSelectionAndMove(-1, 10);  // -> bfile.txt; toggles it back off
+    panel.ToggleSelectionAndMove(-1, 10);  // -> afile.txt; toggles it back off
+
+    CHECK(panel.Cursor() == 1);
+    CHECK(!panel.Entries()[1].selected);  // the gesture's own starting entry -- fully cleared
+    CHECK(!panel.Entries()[2].selected);
+    CHECK(!panel.Entries()[3].selected);
+    CHECK(panel.SelectedCount() == 0);
+}
+
+TEST_CASE(Panel_ToggleSelectionAndMove_UpTogglesEachEntryArrivedAt_SEL007) {
+    test::TempDir root;
+    test::WriteFileContent(root.Path() / L"afile.txt", "x");
+    test::WriteFileContent(root.Path() / L"bfile.txt", "x");
+    test::WriteFileContent(root.Path() / L"cfile.txt", "x");
+
+    Panel panel(root.Path());
+    panel.MoveCursor(3, 10);  // cursor -> cfile.txt (index 3), unselected
+
+    panel.ToggleSelectionAndMove(-1, 10);  // moves to bfile.txt first, then toggles it
+    panel.ToggleSelectionAndMove(-1, 10);  // moves to afile.txt first, then toggles it
+
+    CHECK(panel.Cursor() == 1);
+    CHECK(panel.Entries()[1].selected);   // afile.txt -- arrived at and toggled
+    CHECK(panel.Entries()[2].selected);   // bfile.txt -- arrived at and toggled
+    CHECK(!panel.Entries()[3].selected);  // cfile.txt -- only ever the starting point, never toggled
+    CHECK(panel.SelectedCount() == 2);
+}
+
+TEST_CASE(Panel_ToggleSelectionAndMove_NeverTogglesParentEntry_SEL007) {
+    test::TempDir root;
+    test::WriteFileContent(root.Path() / L"afile.txt", "x");
+
+    Panel panel(root.Path());
+    panel.MoveCursor(1, 10);  // cursor -> afile.txt
+    CHECK(panel.Entries()[panel.Cursor()].name == L"afile.txt");
+
+    panel.ToggleSelectionAndMove(-1, 10);  // moves onto "..", tries to toggle it
+
+    CHECK(panel.Cursor() == 0);
+    CHECK(panel.SelectedCount() == 0);  // ".." is never selectable
 }
 
 TEST_CASE(Panel_SelectAll_SelectsEveryEntryExceptParent_SEL002) {

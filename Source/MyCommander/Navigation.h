@@ -6,6 +6,7 @@
 #include <windows.h>
 
 #include <optional>
+#include <string>
 #include <vector>
 
 namespace mc {
@@ -67,10 +68,41 @@ struct PanelHit {
     int rowOffset = 0;  // 0-based, relative to the panel's own TopIndex()
 };
 
+// UI-013 Part A: where the panels sit horizontally -- the one geometry
+// DrawFrame, HitTestPanel and the panel-content mouse forwarding all use.
+// Widths and X positions are the panels' inner areas (borders excluded).
+// Dual-pane: the left border at 0, the divider at consoleWidth/2, the
+// right border at consoleWidth-1 (the layout since UI-001). Single-panel:
+// only the active side, the full width between the two outer borders.
+struct PanelLayout {
+    bool showLeft = true;
+    bool showRight = true;
+    SHORT leftX = 1, leftWidth = 0;
+    SHORT rightX = 0, rightWidth = 0;
+    SHORT dividerX = -1;  // the middle border column; -1 when single-panel
+};
+
+PanelLayout ComputePanelLayout(SHORT consoleWidth, bool leftActive, bool singlePanel);
+
+// UI-013 Part A: the label on the single panel's bottom border naming the
+// hidden panel -- " Other panel: <text> ", <text> cut from the left with
+// "..." to fit `maxWidth` terminal columns (UI-011 widths). Empty when not
+// even a few characters of <text> would fit.
+std::wstring FormatOtherPanelLabel(const std::wstring& text, int maxWidth);
+
 // `visibleRows` is the panel content's row count (main.cpp's
 // ComputeVisibleRows(console)) — passed in rather than derived here so
-// this function needs only plain values, not a live Console.
-std::optional<PanelHit> HitTestPanel(SHORT consoleWidth, int visibleRows, SHORT mouseX, SHORT mouseY);
+// this function needs only plain values, not a live Console. `topOffset`
+// is how many rows are reserved above the panel frame's own top border —
+// 0 with no such reservation, or FEA-0005's menu-bar row count (currently
+// always 1, since that bar never itself needs more than one row) — kept an
+// explicit parameter rather than a hidden constant so this stays testable
+// against both shapes.
+std::optional<PanelHit> HitTestPanel(SHORT consoleWidth, int visibleRows, SHORT mouseX, SHORT mouseY,
+                                     SHORT topOffset);
+// The same against a given layout -- a hidden panel is never hit (UI-013).
+std::optional<PanelHit> HitTestPanel(const PanelLayout& layout, int visibleRows, SHORT mouseX, SHORT mouseY,
+                                     SHORT topOffset);
 
 // IS-0003: a single row-bounded, column-range clickable area -- generic
 // enough to be shared by both the bottom hint bar's per-command segments

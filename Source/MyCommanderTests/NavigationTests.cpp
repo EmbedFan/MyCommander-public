@@ -1,6 +1,7 @@
 #include "TestFramework.h"
 
 #include "Navigation.h"
+#include "TextWidth.h"
 
 using mc::ClassifyNavigationKey;
 using mc::ClickableRegion;
@@ -135,14 +136,16 @@ TEST_CASE(ClassifyNavigationKey_UnrelatedKeys_ReturnNone) {
     CHECK(ClassifyNavigationKey(L'A', NavKeyContext{}) == NavIntent::None);
 }
 
-// --- HitTestPanel (UI-012) ---------------------------------------------------
+// --- HitTestPanel (UI-012/FEA-0005) -------------------------------------------
 // consoleWidth=80 -> leftWidth=40 (left panel interior: columns 1-39),
 // rightX=41 (right panel interior: columns 41-78); border columns are 0,
-// 40 (the divider), and 79. visibleRows=10 -> entry rows are console rows
-// 3-12 (row 3 = TopIndex()+0).
+// 40 (the divider), and 79. visibleRows=10, topOffset=1 (FEA-0005's
+// always-present menu-bar row, the real production value) -> entry rows
+// are console rows 4-13 (row 4 = TopIndex()+0: menu bar(0) + border(1) +
+// path line(2) + volume line(3)).
 
 TEST_CASE(HitTestPanel_LeftPanelFirstRow_ReturnsRowOffsetZero) {
-    auto hit = HitTestPanel(80, 10, /*mouseX=*/5, /*mouseY=*/3);
+    auto hit = HitTestPanel(80, 10, /*mouseX=*/5, /*mouseY=*/4, /*topOffset=*/1);
     CHECK(hit.has_value());
     if (hit) {
         CHECK(hit->isLeftPanel);
@@ -151,7 +154,7 @@ TEST_CASE(HitTestPanel_LeftPanelFirstRow_ReturnsRowOffsetZero) {
 }
 
 TEST_CASE(HitTestPanel_LeftPanelThirdRow_ReturnsRowOffsetTwo) {
-    auto hit = HitTestPanel(80, 10, /*mouseX=*/5, /*mouseY=*/5);
+    auto hit = HitTestPanel(80, 10, /*mouseX=*/5, /*mouseY=*/6, /*topOffset=*/1);
     CHECK(hit.has_value());
     if (hit) {
         CHECK(hit->isLeftPanel);
@@ -160,7 +163,7 @@ TEST_CASE(HitTestPanel_LeftPanelThirdRow_ReturnsRowOffsetTwo) {
 }
 
 TEST_CASE(HitTestPanel_RightPanel_ReturnsIsLeftPanelFalse) {
-    auto hit = HitTestPanel(80, 10, /*mouseX=*/50, /*mouseY=*/3);
+    auto hit = HitTestPanel(80, 10, /*mouseX=*/50, /*mouseY=*/4, /*topOffset=*/1);
     CHECK(hit.has_value());
     if (hit) {
         CHECK(!hit->isLeftPanel);
@@ -169,31 +172,41 @@ TEST_CASE(HitTestPanel_RightPanel_ReturnsIsLeftPanelFalse) {
 }
 
 TEST_CASE(HitTestPanel_LeftBorderColumn_IsAMiss) {
-    CHECK(!HitTestPanel(80, 10, /*mouseX=*/0, /*mouseY=*/3).has_value());
+    CHECK(!HitTestPanel(80, 10, /*mouseX=*/0, /*mouseY=*/4, /*topOffset=*/1).has_value());
 }
 
 TEST_CASE(HitTestPanel_DividerColumn_IsAMiss) {
-    CHECK(!HitTestPanel(80, 10, /*mouseX=*/40, /*mouseY=*/3).has_value());
+    CHECK(!HitTestPanel(80, 10, /*mouseX=*/40, /*mouseY=*/4, /*topOffset=*/1).has_value());
 }
 
 TEST_CASE(HitTestPanel_RightBorderColumn_IsAMiss) {
-    CHECK(!HitTestPanel(80, 10, /*mouseX=*/79, /*mouseY=*/3).has_value());
+    CHECK(!HitTestPanel(80, 10, /*mouseX=*/79, /*mouseY=*/4, /*topOffset=*/1).has_value());
 }
 
 TEST_CASE(HitTestPanel_AboveEntriesArea_IsAMiss) {
-    // Rows 0-2 are the top border, path line, and UI-003 volume line.
-    CHECK(!HitTestPanel(80, 10, /*mouseX=*/5, /*mouseY=*/0).has_value());
-    CHECK(!HitTestPanel(80, 10, /*mouseX=*/5, /*mouseY=*/2).has_value());
+    // Rows 0-3 are the menu bar, top border, path line, and UI-003 volume line.
+    CHECK(!HitTestPanel(80, 10, /*mouseX=*/5, /*mouseY=*/0, /*topOffset=*/1).has_value());
+    CHECK(!HitTestPanel(80, 10, /*mouseX=*/5, /*mouseY=*/3, /*topOffset=*/1).has_value());
 }
 
 TEST_CASE(HitTestPanel_LastVisibleRow_IsAHit) {
-    auto hit = HitTestPanel(80, 10, /*mouseX=*/5, /*mouseY=*/12);
+    auto hit = HitTestPanel(80, 10, /*mouseX=*/5, /*mouseY=*/13, /*topOffset=*/1);
     CHECK(hit.has_value());
     if (hit) CHECK(hit->rowOffset == 9);
 }
 
 TEST_CASE(HitTestPanel_OneRowBelowVisibleArea_IsAMiss) {
-    CHECK(!HitTestPanel(80, 10, /*mouseX=*/5, /*mouseY=*/13).has_value());
+    CHECK(!HitTestPanel(80, 10, /*mouseX=*/5, /*mouseY=*/14, /*topOffset=*/1).has_value());
+}
+
+TEST_CASE(HitTestPanel_ZeroTopOffset_MatchesTheNoMenuBarGeometry) {
+    // A regression guard for topOffset's own arithmetic, independent of
+    // FEA-0005's real production value (1) above: with no reservation at
+    // all, entries start right after border+path+volume (row 3).
+    auto hit = HitTestPanel(80, 10, /*mouseX=*/5, /*mouseY=*/3, /*topOffset=*/0);
+    CHECK(hit.has_value());
+    if (hit) CHECK(hit->rowOffset == 0);
+    CHECK(!HitTestPanel(80, 10, /*mouseX=*/5, /*mouseY=*/2, /*topOffset=*/0).has_value());
 }
 
 // --- MatchClickRegion (IS-0003) -----------------------------------------------
@@ -225,4 +238,63 @@ TEST_CASE(MatchClickRegion_StartColumnIsInclusive_EndColumnIsExclusive) {
 
 TEST_CASE(MatchClickRegion_EmptyRegions_IsAMiss) {
     CHECK(MatchClickRegion({}, 5, 5) == -1);
+}
+
+// --- PanelLayout / FormatOtherPanelLabel (UI-013 Part A) ------------------------
+
+TEST_CASE(PanelLayout_DualPane_MatchesTheOriginalSplitAtEveryWidth_UI013) {
+    for (int w = 60; w <= 300; ++w) {
+        SHORT width = static_cast<SHORT>(w);
+        for (bool leftActive : {true, false}) {
+            mc::PanelLayout layout = mc::ComputePanelLayout(width, leftActive, false);
+            SHORT leftWidth = static_cast<SHORT>(width / 2);              // DrawFrame's formula before UI-013
+            SHORT rightWidth = static_cast<SHORT>(width - leftWidth - 1);
+            CHECK(layout.showLeft && layout.showRight);
+            CHECK(layout.leftX == 1 && layout.leftWidth == leftWidth - 1);
+            CHECK(layout.dividerX == leftWidth);
+            CHECK(layout.rightX == leftWidth + 1 && layout.rightWidth == rightWidth - 1);
+            CHECK(layout.rightX + layout.rightWidth == width - 1);  // ends at the right border
+        }
+    }
+}
+
+TEST_CASE(PanelLayout_SinglePanel_ShowsOnlyTheActiveSideFullWidth_UI013) {
+    mc::PanelLayout left = mc::ComputePanelLayout(80, /*leftActive=*/true, /*singlePanel=*/true);
+    CHECK(left.showLeft && !left.showRight && left.dividerX == -1);
+    CHECK(left.leftX == 1 && left.leftWidth == 78);
+    mc::PanelLayout right = mc::ComputePanelLayout(60, /*leftActive=*/false, /*singlePanel=*/true);
+    CHECK(!right.showLeft && right.showRight && right.dividerX == -1);
+    CHECK(right.rightX == 1 && right.rightWidth == 58);
+}
+
+TEST_CASE(HitTestPanel_SinglePanel_HitsOnlyTheShownSide_UI013) {
+    for (bool leftActive : {true, false}) {
+        mc::PanelLayout layout = mc::ComputePanelLayout(80, leftActive, true);
+        for (SHORT x = 1; x <= 78; ++x) {
+            auto hit = HitTestPanel(layout, 10, x, /*mouseY=*/4, /*topOffset=*/1);
+            CHECK(hit.has_value() && hit->isLeftPanel == leftActive);
+        }
+        CHECK(!HitTestPanel(layout, 10, 0, 4, 1).has_value());   // left border
+        CHECK(!HitTestPanel(layout, 10, 79, 4, 1).has_value());  // right border
+    }
+}
+
+TEST_CASE(HitTestPanel_LayoutOverload_AgreesWithTheWidthOverload_UI013) {
+    mc::PanelLayout layout = mc::ComputePanelLayout(101, true, false);
+    for (SHORT x = 0; x < 101; ++x) {
+        auto a = HitTestPanel(101, 10, x, 5, 1);
+        auto b = HitTestPanel(layout, 10, x, 5, 1);
+        CHECK(a.has_value() == b.has_value());
+        if (a && b) CHECK(a->isLeftPanel == b->isLeftPanel && a->rowOffset == b->rowOffset);
+    }
+}
+
+TEST_CASE(FormatOtherPanelLabel_FitsTruncatesAndGivesUp_UI013) {
+    CHECK(mc::FormatOtherPanelLabel(L"D:\\Backup", 40) == L" Other panel: D:\\Backup ");
+    std::wstring longPath = L"C:\\Users\\someone\\Documents\\Projects\\MyCommander\\Source";
+    std::wstring cut = mc::FormatOtherPanelLabel(longPath, 40);
+    CHECK(mc::StringDisplayWidth(cut) <= 40 && cut.find(L" Other panel: ...") == 0 && cut.find(L"Source ") != std::wstring::npos);
+    std::wstring wide = mc::FormatOtherPanelLabel(L"C:\\\u6587\u66f8\u6587\u66f8\u6587\u66f8\u6587\u66f8\u6587\u66f8\u6587\u66f8", 30);
+    CHECK(!wide.empty() && mc::StringDisplayWidth(wide) <= 30);  // full-width characters count double (UI-011)
+    CHECK(mc::FormatOtherPanelLabel(L"D:\\Backup", 18).empty());  // no room: no label
 }

@@ -112,6 +112,93 @@ TEST_CASE(Copy_SingleFile_CopiesContentAndLeavesSourceIntact) {
     CHECK(fs::exists(srcDir / L"a.txt"));
 }
 
+// --- CopyItemAs (FOP-019, Shift+F5) ------------------------------------------
+
+TEST_CASE(CopyItemAs_SameDirectoryNewName_CreatesSiblingCopyNotDirectory_FOP019) {
+    test::TempDir root;
+    test::WriteFileContent(root.Path() / L"a.txt", "payload");
+
+    OperationOutcome outcome = mc::CopyItemAs(root.Path(), L"a.txt", root.Path() / L"b.txt", NoConflictExpected,
+                                              AlwaysContinue, NeverCancel);
+
+    CHECK(outcome.succeeded == 1);
+    CHECK(outcome.failed.empty());
+    CHECK(fs::is_regular_file(root.Path() / L"b.txt"));  // a file, not a directory holding a.txt
+    CHECK(test::ReadFileContent(root.Path() / L"b.txt") == "payload");
+    CHECK(test::ReadFileContent(root.Path() / L"a.txt") == "payload");
+}
+
+TEST_CASE(CopyItemAs_DirectoryNewName_CopiesTree_FOP019) {
+    test::TempDir root;
+    fs::create_directories(root.Path() / L"dir");
+    test::WriteFileContent(root.Path() / L"dir" / L"inner.txt", "x");
+
+    OperationOutcome outcome = mc::CopyItemAs(root.Path(), L"dir", root.Path() / L"dir2", NoConflictExpected,
+                                              AlwaysContinue, NeverCancel);
+
+    CHECK(outcome.succeeded == 1);
+    CHECK(test::ReadFileContent(root.Path() / L"dir2" / L"inner.txt") == "x");
+    CHECK(!fs::exists(root.Path() / L"dir2" / L"dir"));
+}
+
+TEST_CASE(CopyItemAs_OtherDirectoryFullPath_UsesGivenName_FOP019) {
+    test::TempDir root;
+    fs::create_directories(root.Path() / L"src");
+    fs::create_directories(root.Path() / L"elsewhere");
+    test::WriteFileContent(root.Path() / L"src" / L"a.txt", "p");
+
+    OperationOutcome outcome = mc::CopyItemAs(root.Path() / L"src", L"a.txt", root.Path() / L"elsewhere" / L"c.txt",
+                                              NoConflictExpected, AlwaysContinue, NeverCancel);
+
+    CHECK(outcome.succeeded == 1);
+    CHECK(test::ReadFileContent(root.Path() / L"elsewhere" / L"c.txt") == "p");
+}
+
+TEST_CASE(CopyItemAs_ExistingTarget_AsksConflictAndHonorsOverwrite_FOP019) {
+    test::TempDir root;
+    test::WriteFileContent(root.Path() / L"a.txt", "new");
+    test::WriteFileContent(root.Path() / L"b.txt", "old");
+    int asked = 0;
+
+    OperationOutcome outcome = mc::CopyItemAs(
+        root.Path(), L"a.txt", root.Path() / L"b.txt",
+        [&](const fs::path& d) {
+            ++asked;
+            CHECK(d.filename() == L"b.txt");
+            return Overwrite();
+        },
+        AlwaysContinue, NeverCancel);
+
+    CHECK(asked == 1);
+    CHECK(outcome.succeeded == 1);
+    CHECK(test::ReadFileContent(root.Path() / L"b.txt") == "new");
+}
+
+TEST_CASE(CopyItems_OverwriteOntoItself_FailsWithoutTouchingSource_FOP019) {
+    test::TempDir root;
+    test::WriteFileContent(root.Path() / L"a.txt", "keep me");
+
+    OperationOutcome outcome =
+        CopyItems(root.Path(), {L"a.txt"}, root.Path(), [](const fs::path&) { return Overwrite(); }, AlwaysContinue,
+                  NeverCancel);
+
+    CHECK(outcome.succeeded == 0);
+    CHECK(outcome.failed.size() == 1);
+    CHECK(test::ReadFileContent(root.Path() / L"a.txt") == "keep me");
+}
+
+TEST_CASE(CopyItems_SameDirectoryConflictRename_StillDuplicates_FOP019) {
+    test::TempDir root;
+    test::WriteFileContent(root.Path() / L"a.txt", "dup");
+
+    OperationOutcome outcome = CopyItems(root.Path(), {L"a.txt"}, root.Path(),
+                                         [](const fs::path&) { return RenameTo(L"a copy.txt"); }, AlwaysContinue,
+                                         NeverCancel);
+
+    CHECK(outcome.succeeded == 1);
+    CHECK(test::ReadFileContent(root.Path() / L"a copy.txt") == "dup");
+}
+
 TEST_CASE(Copy_MixedFileAndDirectory_CopiesNestedTree) {
     test::TempDir root;
     fs::path srcDir = root.Path() / L"src";
@@ -609,6 +696,98 @@ TEST_CASE(Rename_RefusesEmptyAndDotNames) {
     CHECK(fs::exists(root.Path() / L"old.txt"));
 }
 
+// FOP-017 (D6): a case-only rename used to be refused as "already exists"
+// (the target is the source itself on a case-insensitive file system).
+TEST_CASE(Rename_CaseOnly_Succeeds_FOP017) {
+    test::TempDir root;
+    test::WriteFileContent(root.Path() / L"report.txt", "content");
+
+    auto result = RenameItem(root.Path(), L"report.txt", L"Report.TXT");
+
+    CHECK(result.ok);
+    std::wstring onDisk;
+    for (const auto& e : fs::directory_iterator(root.Path())) onDisk = e.path().filename().wstring();
+    CHECK(onDisk == L"Report.TXT");
+}
+
+// --- RenameItems (FOP-017 group rename engine) ---------------------------------
+
+namespace {
+mc::RenameStep Step(const std::wstring& from, const std::wstring& to, const std::wstring& original, bool toTemp = false,
+                    bool fromTemp = false) {
+    return mc::RenameStep{from, to, original, toTemp, fromTemp};
+}
+}  // namespace
+
+TEST_CASE(RenameItems_SwapThroughTemporaryName_SwapsContents_FOP017) {
+    test::TempDir root;
+    test::WriteFileContent(root.Path() / L"a.txt", "A");
+    test::WriteFileContent(root.Path() / L"b.txt", "B");
+    std::vector<mc::RenameStep> steps{Step(L"a.txt", L"~mcren.1.tmp", L"a.txt", true),
+                                      Step(L"b.txt", L"a.txt", L"b.txt"),
+                                      Step(L"~mcren.1.tmp", L"b.txt", L"a.txt", false, true)};
+    int starts = 0;
+    auto onItemStart = [&](const std::wstring&, int, int total) {
+        ++starts;
+        CHECK(total == 2);
+        return true;
+    };
+    OperationOutcome outcome = mc::RenameItems(root.Path(), steps, onItemStart);
+    CHECK(outcome.succeeded == 2);
+    CHECK(starts == 2);  // once per item, not per step
+    CHECK(test::ReadFileContent(root.Path() / L"a.txt") == "B");
+    CHECK(test::ReadFileContent(root.Path() / L"b.txt") == "A");
+    CHECK(!fs::exists(root.Path() / L"~mcren.1.tmp"));
+}
+
+TEST_CASE(RenameItems_LockedItemSkipped_OthersRenamed_NoTempLeft_FOP017) {
+    test::TempDir root;
+    for (const wchar_t* n : {L"x.txt", L"locked.txt", L"z.txt"}) test::WriteFileContent(root.Path() / n, "x");
+    HANDLE lock = LockExclusive(root.Path() / L"locked.txt");
+    CHECK(lock != INVALID_HANDLE_VALUE);
+    std::vector<mc::RenameStep> steps{Step(L"x.txt", L"x1.txt", L"x.txt"), Step(L"locked.txt", L"l1.txt", L"locked.txt"),
+                                      Step(L"z.txt", L"z1.txt", L"z.txt")};
+    int asked = 0;
+    auto onError = [&](const std::wstring& name, const std::wstring&, DWORD) {
+        ++asked;
+        CHECK(name == L"locked.txt");
+        return SkipError();
+    };
+    OperationOutcome outcome = mc::RenameItems(root.Path(), steps, {}, onError);
+    CloseHandle(lock);
+    CHECK(asked == 1);
+    CHECK(outcome.succeeded == 2);
+    CHECK(outcome.skipped == 1);
+    CHECK(fs::exists(root.Path() / L"x1.txt") && fs::exists(root.Path() / L"z1.txt"));
+    CHECK(fs::exists(root.Path() / L"locked.txt"));
+}
+
+TEST_CASE(RenameItems_CancelWithItemAtTemporaryName_RollsItBack_FOP017) {
+    test::TempDir root;
+    test::WriteFileContent(root.Path() / L"a.txt", "A");
+    test::WriteFileContent(root.Path() / L"b.txt", "B");
+    std::vector<mc::RenameStep> steps{Step(L"a.txt", L"~mcren.1.tmp", L"a.txt", true),
+                                      Step(L"b.txt", L"a.txt", L"b.txt"),
+                                      Step(L"~mcren.1.tmp", L"b.txt", L"a.txt", false, true)};
+    auto stopAtSecond = [](const std::wstring&, int done, int) { return done < 1; };
+    OperationOutcome outcome = mc::RenameItems(root.Path(), steps, stopAtSecond);
+    CHECK(outcome.cancelled);
+    CHECK(outcome.failed.empty());
+    CHECK(test::ReadFileContent(root.Path() / L"a.txt") == "A");  // put back
+    CHECK(test::ReadFileContent(root.Path() / L"b.txt") == "B");
+    CHECK(!fs::exists(root.Path() / L"~mcren.1.tmp"));
+}
+
+TEST_CASE(RenameItems_NeverOverwritesAnExistingTarget_FOP017) {
+    test::TempDir root;
+    test::WriteFileContent(root.Path() / L"a.txt", "A");
+    test::WriteFileContent(root.Path() / L"b.txt", "B");
+    OperationOutcome outcome = mc::RenameItems(root.Path(), {Step(L"a.txt", L"b.txt", L"a.txt")});
+    CHECK(outcome.succeeded == 0);
+    CHECK(outcome.failed.size() == 1);
+    CHECK(test::ReadFileContent(root.Path() / L"b.txt") == "B");
+}
+
 // --- Create directory --------------------------------------------------------
 
 TEST_CASE(CreateNewDirectory_Basic_CreatesEmptyDirectory) {
@@ -815,6 +994,80 @@ TEST_CASE(Delete_RecycleBin_RemovesItemFromOriginalLocation) {
     } else {
         wprintf(L"  (note: Recycle Bin delete failed in this environment, skipping assertion)\n");
     }
+}
+
+// IS-0018: the Recycle Bin path now goes item by item, like the permanent
+// one -- so the caller's animated progress dialog counts and animates for
+// F8, Esc stops between items, and a failure is that item's alone.
+TEST_CASE(Delete_RecycleBin_CallsOnItemStartPerItem_IS0018) {
+    test::TempDir root;
+    for (const wchar_t* n : {L"a.txt", L"b.txt", L"c.txt"}) test::WriteFileContent(root.Path() / n, "x");
+
+    std::vector<std::pair<int, int>> calls;
+    auto onItemStart = [&](const std::wstring&, int done, int total) {
+        calls.emplace_back(done, total);
+        return true;
+    };
+    OperationOutcome outcome = DeleteItems(root.Path(), {L"a.txt", L"b.txt", L"c.txt"}, /*permanent=*/false, onItemStart);
+
+    CHECK((calls == std::vector<std::pair<int, int>>{{0, 3}, {1, 3}, {2, 3}}));
+    if (outcome.failed.empty()) {
+        CHECK(outcome.succeeded == 3);
+        CHECK(!fs::exists(root.Path() / L"b.txt"));
+    } else {
+        wprintf(L"  (note: Recycle Bin delete failed in this environment, skipping assertion)\n");
+    }
+}
+
+TEST_CASE(Delete_RecycleBin_CancelBeforeSecondItem_LeavesTheRest_IS0018) {
+    test::TempDir root;
+    for (const wchar_t* n : {L"a.txt", L"b.txt", L"c.txt"}) test::WriteFileContent(root.Path() / n, "x");
+
+    auto stopAtSecond = [](const std::wstring&, int done, int) { return done < 1; };
+    OperationOutcome outcome = DeleteItems(root.Path(), {L"a.txt", L"b.txt", L"c.txt"}, /*permanent=*/false, stopAtSecond);
+
+    CHECK(outcome.cancelled);
+    CHECK(fs::exists(root.Path() / L"b.txt"));
+    CHECK(fs::exists(root.Path() / L"c.txt"));
+    if (outcome.failed.empty()) {
+        CHECK(outcome.succeeded == 1);
+        CHECK(!fs::exists(root.Path() / L"a.txt"));
+    }
+}
+
+// Regression guard: one locked item used to mark *every* item as failed.
+TEST_CASE(Delete_RecycleBin_LockedFile_FailsOrSkipsOnlyThatItem_IS0018) {
+    test::TempDir root;
+    for (const wchar_t* n : {L"a.txt", L"locked.txt", L"c.txt"}) test::WriteFileContent(root.Path() / n, "x");
+    HANDLE lock = LockExclusive(root.Path() / L"locked.txt");
+    CHECK(lock != INVALID_HANDLE_VALUE);
+
+    OperationOutcome noHandler = DeleteItems(root.Path(), {L"a.txt", L"locked.txt", L"c.txt"}, /*permanent=*/false);
+    if (noHandler.succeeded == 0) {
+        wprintf(L"  (note: Recycle Bin delete failed in this environment, skipping assertion)\n");
+        CloseHandle(lock);
+        return;
+    }
+    CHECK(noHandler.succeeded == 2);
+    CHECK(noHandler.failed.size() == 1);
+    if (noHandler.failed.size() == 1) CHECK(noHandler.failed[0].first == L"locked.txt");
+    CHECK(fs::exists(root.Path() / L"locked.txt"));
+
+    // With a handler: offered Retry/Skip for that item alone.
+    test::WriteFileContent(root.Path() / L"d.txt", "x");
+    int asked = 0;
+    auto onError = [&](const std::wstring& name, const std::wstring&, DWORD win32Error) {
+        ++asked;
+        CHECK(name == L"locked.txt");
+        CHECK(win32Error == 0);  // never offers Elevate & Retry for the Recycle Bin
+        return SkipError();
+    };
+    OperationOutcome withHandler = DeleteItems(root.Path(), {L"locked.txt", L"d.txt"}, /*permanent=*/false, {}, {}, onError);
+    CloseHandle(lock);
+    CHECK(asked == 1);
+    CHECK(withHandler.skipped == 1);
+    CHECK(withHandler.succeeded == 1);
+    CHECK(withHandler.failed.empty());
 }
 
 // PER-002: the permanent-delete path gained the same live-progress-plus-

@@ -5,9 +5,7 @@
 
 namespace mc {
 
-Console::Console() {
-    originalOutput_ = GetStdHandle(STD_OUTPUT_HANDLE);
-    input_ = GetStdHandle(STD_INPUT_HANDLE);
+Console::Console() : input_(GetStdHandle(STD_INPUT_HANDLE)), originalOutput_(GetStdHandle(STD_OUTPUT_HANDLE)) {
 
     GetConsoleMode(originalOutput_, &originalOutputMode_);
     GetConsoleMode(input_, &originalInputMode_);
@@ -40,6 +38,8 @@ Console::~Console() {
     SetConsoleMode(input_, originalInputMode_);
     CloseHandle(output_);
 }
+
+void Console::SetTitle(const std::wstring& title) { SetConsoleTitleW(title.c_str()); }
 
 void Console::UpdateSize() {
     CONSOLE_SCREEN_BUFFER_INFO info;
@@ -112,6 +112,23 @@ void Console::Present() {
     COORD bufSize{width_, height_};
     COORD bufOrigin{0, 0};
     WriteConsoleOutputW(output_, buffer_.data(), bufSize, bufOrigin, &region);
+}
+
+bool PollAndConsumeEscape(Console& console) {
+    bool escapePressed = false;
+    INPUT_RECORD record;
+    DWORD count = 0;
+    while (PeekConsoleInputW(console.InputHandle(), &record, 1, &count) && count > 0) {
+        DWORD consumed = 0;
+        if (!ReadConsoleInputW(console.InputHandle(), &record, 1, &consumed) || consumed == 0) break;
+        if (record.EventType == KEY_EVENT && record.Event.KeyEvent.bKeyDown &&
+            record.Event.KeyEvent.wVirtualKeyCode == VK_ESCAPE) {
+            escapePressed = true;
+        } else if (record.EventType == WINDOW_BUFFER_SIZE_EVENT) {
+            console.UpdateSize();
+        }
+    }
+    return escapePressed;
 }
 
 } // namespace mc

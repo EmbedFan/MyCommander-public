@@ -91,6 +91,8 @@ uint64_t RecordLine(TextFileIndex& index, uint64_t lineStart, uint64_t lineEnd, 
 void IndexUtf8OrAnsiLines(std::ifstream& in, TextFileIndex& index) {
     constexpr size_t kChunkSize = 1 << 20; // 1 MB
     std::vector<char> chunk(kChunkSize);
+    // Both start at the content start on purpose (chunk position vs line start), then diverge.
+    // cppcheck-suppress duplicateAssignExpression
     uint64_t basePos = index.contentStart;
     uint64_t lineStart = index.contentStart;
 
@@ -119,6 +121,8 @@ void IndexUtf16LeLines(std::ifstream& in, TextFileIndex& index) {
     constexpr size_t kChunkSize = 1 << 20; // 1 MB
     std::vector<char> chunk(kChunkSize);
     std::string carry;
+    // Both start at the content start on purpose (chunk position vs line start), then diverge.
+    // cppcheck-suppress duplicateAssignExpression
     uint64_t basePos = index.contentStart;
     uint64_t lineStart = index.contentStart;
 
@@ -170,6 +174,129 @@ TextFileIndex IndexTextFileForViewing(const fs::path& path, int tabWidth) {
 
     index.ok = true;
     return index;
+}
+
+namespace {
+
+std::wstring DecodeCodePage(UINT codePage, const char* data, size_t len, DWORD flags = 0) {
+    if (len == 0) return L"";
+    int wideLen = MultiByteToWideChar(codePage, flags, data, static_cast<int>(len), nullptr, 0);
+    if (wideLen <= 0) return L"";
+    std::wstring result(static_cast<size_t>(wideLen), L'\0');
+    MultiByteToWideChar(codePage, flags, data, static_cast<int>(len), result.data(), wideLen);
+    return result;
+}
+
+std::wstring DecodeEightBitLine(const std::string& bytes, TextEncodingChoice encoding) {
+    size_t len = bytes.size();
+    if (len > 0 && bytes[len - 1] == '\r') --len;
+    if (encoding == TextEncodingChoice::Utf8) return DecodeCodePage(CP_UTF8, bytes.data(), len);
+    if (encoding == TextEncodingChoice::Ansi) return DecodeCodePage(CP_ACP, bytes.data(), len);
+    std::wstring text = DecodeUtf8Strict(bytes.data(), len);  // Auto: UTF-8 if valid...
+    if (text.empty() && len > 0) text = DecodeCodePage(CP_ACP, bytes.data(), len);  // ...else ANSI
+    return text;
+}
+
+constexpr size_t kMaxRawLineBytes = 256 * 1024;
+
+}  // namespace
+
+bool ForEachTextLine(const fs::path& path, TextEncodingChoice encoding,
+                     const std::function<bool(size_t, const std::wstring&)>& onLine,
+                     const std::function<bool(const TextFileProbe&)>& onProbe) {
+    std::ifstream in(ToLongPath(path), std::ios::binary);
+    if (!in) return false;
+
+    constexpr size_t kChunkSize = 1 << 16;
+    std::vector<char> chunk(kChunkSize);
+    in.read(chunk.data(), static_cast<std::streamsize>(kChunkSize));
+    size_t got = static_cast<size_t>(in.gcount());
+    if (in.bad()) return false;
+
+    // BOM: decides the encoding under Auto; skipped when it matches an explicit choice.
+    auto byteAt = [&](size_t i) { return i < got ? static_cast<unsigned char>(chunk[i]) : 0; };
+    bool bomUtf8 = got >= 3 && byteAt(0) == 0xEF && byteAt(1) == 0xBB && byteAt(2) == 0xBF;
+    bool bomLe = got >= 2 && byteAt(0) == 0xFF && byteAt(1) == 0xFE;
+    bool bomBe = got >= 2 && byteAt(0) == 0xFE && byteAt(1) == 0xFF;
+    TextEncodingChoice effective = encoding;
+    if (encoding == TextEncodingChoice::Auto) {
+        if (bomLe) effective = TextEncodingChoice::Utf16Le;
+        else if (bomBe) effective = TextEncodingChoice::Utf16Be;
+        else if (bomUtf8) effective = TextEncodingChoice::Utf8;
+    }
+    size_t skip = 0;
+    if (bomUtf8 && (effective == TextEncodingChoice::Utf8 || effective == TextEncodingChoice::Auto)) skip = 3;
+    if (bomLe && effective == TextEncodingChoice::Utf16Le) skip = 2;
+    if (bomBe && effective == TextEncodingChoice::Utf16Be) skip = 2;
+
+    if (onProbe) {
+        TextFileProbe probe;
+        probe.head.assign(reinterpret_cast<unsigned char*>(chunk.data()),
+                          reinterpret_cast<unsigned char*>(chunk.data()) + (std::min)(got, size_t{8192}));
+        probe.utf16Bom = bomLe || bomBe;
+        if (!onProbe(probe)) return true;
+    }
+
+    const bool wide = effective == TextEncodingChoice::Utf16Le || effective == TextEncodingChoice::Utf16Be;
+    size_t lineNumber = 0;
+    std::string line8;
+    std::wstring line16;
+    bool truncated = false;
+    unsigned char pendingByte = 0;
+    bool havePending = false;
+
+    auto emit8 = [&]() {
+        ++lineNumber;
+        bool keep = onLine(lineNumber, DecodeEightBitLine(line8, effective));
+        line8.clear();
+        truncated = false;
+        return keep;
+    };
+    auto emit16 = [&]() {
+        ++lineNumber;
+        if (!line16.empty() && line16.back() == L'\r') line16.pop_back();
+        bool keep = onLine(lineNumber, line16);
+        line16.clear();
+        truncated = false;
+        return keep;
+    };
+
+    size_t start = skip;
+    while (got > 0) {
+        for (size_t i = start; i < got; ++i) {
+            unsigned char b = static_cast<unsigned char>(chunk[i]);
+            if (!wide) {
+                if (b == '\n') {
+                    if (!emit8()) return true;
+                } else if (!truncated) {
+                    line8.push_back(static_cast<char>(b));
+                    if (line8.size() >= kMaxRawLineBytes) truncated = true;
+                }
+                continue;
+            }
+            if (!havePending) {
+                pendingByte = b;
+                havePending = true;
+                continue;
+            }
+            havePending = false;
+            wchar_t unit = effective == TextEncodingChoice::Utf16Le ? static_cast<wchar_t>(pendingByte | (b << 8))
+                                                                   : static_cast<wchar_t>((pendingByte << 8) | b);
+            if (unit == L'\n') {
+                if (!emit16()) return true;
+            } else if (!truncated) {
+                line16.push_back(unit);
+                if (line16.size() * 2 >= kMaxRawLineBytes) truncated = true;
+            }
+        }
+        start = 0;
+        in.read(chunk.data(), static_cast<std::streamsize>(kChunkSize));
+        got = static_cast<size_t>(in.gcount());
+        if (in.bad()) return false;
+    }
+    // The last line, if the file doesn't end with a line break.
+    if (wide ? !line16.empty() : !line8.empty()) wide ? emit16() : emit8();
+    return true;
 }
 
 std::wstring ReadIndexedLine(std::ifstream& in, const TextFileIndex& index, size_t lineNumber) {
