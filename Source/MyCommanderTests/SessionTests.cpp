@@ -62,3 +62,28 @@ TEST_CASE(Session_OlderFileOrBadValueMeansDualPane_UI013) {
     test::WriteFileContent(sessionPath, "singlePanel = YES\n");
     CHECK(LoadSessionFrom(sessionPath).singlePanel);
 }
+
+TEST_CASE(Session_RemembersBriefViewPerPanel_UI017) {
+    test::TempDir directory;
+    const auto sessionPath = directory.Path() / L"session.ini";
+    SessionState saved{directory.Path() / L"l", directory.Path() / L"r"};
+    saved.leftBrief = true;
+    saved.rightBrief = false;
+    CHECK(SaveSessionTo(sessionPath, saved));
+    SessionState loaded = LoadSessionFrom(sessionPath);
+    CHECK(loaded.leftBrief);
+    CHECK(!loaded.rightBrief);
+}
+
+TEST_CASE(Session_OlderFileOrBadValueMeansFullView_UI017) {
+    test::TempDir directory;
+    const auto sessionPath = directory.Path() / L"session.ini";
+    test::WriteFileContent(sessionPath, "leftPath = C:\\a\nrightPath = C:\\b\n");
+    CHECK(!LoadSessionFrom(sessionPath).leftBrief);
+    CHECK(!LoadSessionFrom(sessionPath).rightBrief);
+    test::WriteFileContent(sessionPath, "leftPath = C:\\a\nrightPath = C:\\b\nleftBrief = maybe\n");
+    CHECK(!LoadSessionFrom(sessionPath).leftBrief);
+    test::WriteFileContent(sessionPath, "leftPath = C:\\a\nrightPath = C:\\b\nleftBrief = YES\nrightBrief = true\n");
+    CHECK(LoadSessionFrom(sessionPath).leftBrief);
+    CHECK(LoadSessionFrom(sessionPath).rightBrief);
+}

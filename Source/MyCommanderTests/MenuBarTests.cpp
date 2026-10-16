@@ -41,8 +41,8 @@ TEST_CASE(BuildMenus_FileMenu_HasEveryRequestedItem_FEA0005) {
     // BuildMenus_FileMenu_HasNoBuiltinPackStub_FEA0007 below).
     const std::vector<std::wstring> expected = {L"Modify Attribs",
                                                 L"Compare contents", L"Assign File to App",
-                                                L"Used Disk Area",  L"Group Rename",   L"Generate Check Code",
-                                                L"Exit"};
+                                                L"Used Disk Area",  L"Group Rename",   L"Undo",  L"Paste from Explorer", L"Create shortcut", L"Secure delete",
+                                                L"Generate Check Code", L"Exit"};  // FOP-022: Undo
     CHECK(menus[0].items.size() == expected.size());
     for (const auto& label : expected) {
         bool found = std::any_of(menus[0].items.begin(), menus[0].items.end(),
@@ -192,9 +192,8 @@ TEST_CASE(BuildMenus_TreeIsARealItem_NotAStub_UI013) {
     }
 }
 
-TEST_CASE(BuildMenus_SinglePanelIsCtrlF1_FullAndListStayStubs_UI013) {
-    // UI-013, Part A: View > Single panel (P) simulates Ctrl+F1; "Full"/"List"
-    // stay reserved for detailed/brief listings.
+TEST_CASE(BuildMenus_SinglePanelIsCtrlF1_UI013) {
+    // UI-013, Part A: View > Single panel (P) simulates Ctrl+F1.
     const auto& menus = BuildMenus();
     const TopMenu& view = menus[4];
     int idx = FindItemByMnemonic(view, L'P');
@@ -205,8 +204,25 @@ TEST_CASE(BuildMenus_SinglePanelIsCtrlF1_FullAndListStayStubs_UI013) {
         CHECK(item.kind == MenuItemKind::SimulatedKey);
         CHECK(item.action.virtualKeyCode == VK_F1 && item.action.ctrlHeld && !item.action.altHeld);
     }
-    for (const auto& item : view.items)
-        if (item.label == L"Full" || item.label == L"List") CHECK(item.kind != MenuItemKind::SimulatedKey);
+}
+
+TEST_CASE(BuildMenus_ViewFullAndListAreCtrlF7AndCtrlF8_NotStubs_UI017) {
+    // MENU-STUBS/UI-017: Full/List (Ctrl+F7/Ctrl+F8) were stubs since FEA-0005.
+    const auto& menus = BuildMenus();
+    const TopMenu& view = menus[4];
+    int fullIdx = FindItemByMnemonic(view, L'F');
+    int listIdx = FindItemByMnemonic(view, L'L');
+    CHECK(fullIdx >= 0 && listIdx >= 0);
+    if (fullIdx >= 0) {
+        const auto& item = view.items[static_cast<size_t>(fullIdx)];
+        CHECK(item.kind == MenuItemKind::SimulatedKey);
+        CHECK(item.action.virtualKeyCode == VK_F7 && item.action.ctrlHeld);
+    }
+    if (listIdx >= 0) {
+        const auto& item = view.items[static_cast<size_t>(listIdx)];
+        CHECK(item.kind == MenuItemKind::SimulatedKey);
+        CHECK(item.action.virtualKeyCode == VK_F8 && item.action.ctrlHeld);
+    }
 }
 
 TEST_CASE(BuildMenus_FileGroupRenameIsCtrlM_NotAStub_FOP017) {
@@ -220,6 +236,66 @@ TEST_CASE(BuildMenus_FileGroupRenameIsCtrlM_NotAStub_FOP017) {
         CHECK(item.action.virtualKeyCode == static_cast<WORD>(L'M'));
         CHECK(item.action.ctrlHeld);
     }
+}
+
+TEST_CASE(BuildMenus_FileUsedDiskAreaIsAltShiftEnter_NotAStub_FOP020) {
+    const auto& menus = BuildMenus();
+    int idx = FindItemByMnemonic(menus[0], L'D');  // File
+    CHECK(idx >= 0);
+    if (idx >= 0) {
+        const auto& item = menus[0].items[static_cast<size_t>(idx)];
+        CHECK(item.label == L"Used Disk Area");
+        CHECK(item.kind == MenuItemKind::SimulatedKey);
+        CHECK(item.action.virtualKeyCode == VK_RETURN);
+        CHECK(item.action.altHeld && item.action.shiftHeld && !item.action.ctrlHeld);
+    }
+}
+
+TEST_CASE(BuildMenus_FileGenerateCheckCodeIsMenuOnly_NotAStub_FOP021) {
+    const auto& menus = BuildMenus();
+    int idx = FindItemByMnemonic(menus[0], L'E');  // File
+    CHECK(idx >= 0);
+    if (idx >= 0) {
+        const auto& item = menus[0].items[static_cast<size_t>(idx)];
+        CHECK(item.label == L"Generate Check Code");
+        CHECK(item.kind == MenuItemKind::CheckCode);
+    }
+}
+
+TEST_CASE(BuildMenus_SelectionCopyNamesIsCtrlShiftC_NotAStub_SEL008) {
+    const auto& menus = BuildMenus();
+    int idx = FindItemByMnemonic(menus[1], L'C');  // Selection
+    CHECK(idx >= 0);
+    if (idx >= 0) {
+        const auto& item = menus[1].items[static_cast<size_t>(idx)];
+        CHECK(item.label == L"Copy Selected Names to Clipboard");
+        CHECK(item.kind == MenuItemKind::SimulatedKey);
+        CHECK(item.action.virtualKeyCode == static_cast<WORD>(L'C'));
+        CHECK(item.action.ctrlHeld && item.action.shiftHeld);
+    }
+}
+
+TEST_CASE(BuildMenus_CommandsDiskLabelIsMenuOnly_NotAStub_NAV013) {
+    const auto& menus = BuildMenus();
+    int idx = FindItemByMnemonic(menus[2], L'D');  // Commands
+    CHECK(idx >= 0);
+    if (idx >= 0) {
+        const auto& item = menus[2].items[static_cast<size_t>(idx)];
+        CHECK(item.label == L"Disk Label");
+        CHECK(item.kind == MenuItemKind::DiskLabel);
+    }
+}
+
+TEST_CASE(BuildMenus_NetworkItemsAreMenuOnly_NotStubs_NAV014_NAV015) {
+    const auto& menus = BuildMenus();
+    const TopMenu& network = menus[3];
+    int conn = FindItemByMnemonic(network, L'N');
+    int share = FindItemByMnemonic(network, L'S');
+    int unshare = FindItemByMnemonic(network, L'U');
+    CHECK(conn >= 0 && share >= 0 && unshare >= 0);
+    if (conn >= 0) CHECK(network.items[static_cast<size_t>(conn)].kind == MenuItemKind::NetworkConnection);
+    if (share >= 0) CHECK(network.items[static_cast<size_t>(share)].kind == MenuItemKind::ShareFolder);
+    if (unshare >= 0) CHECK(network.items[static_cast<size_t>(unshare)].kind == MenuItemKind::UnshareFolder);
 }
 
 TEST_CASE(BuildMenus_CommandsHasQueueDelete_AltF8_FOP014) {
@@ -245,6 +321,17 @@ TEST_CASE(BuildMenus_CommandsHasDirectoryHotlist_CtrlD_NAV007) {
         CHECK(item.kind == MenuItemKind::SimulatedKey);
         CHECK(item.action.virtualKeyCode == static_cast<WORD>(L'D'));
         CHECK(item.action.ctrlHeld);
+    }
+}
+
+TEST_CASE(BuildMenus_CommandsHasExportListing_MenuOnly_LIST012) {
+    const auto& menus = BuildMenus();
+    int idx = FindItemByMnemonic(menus[2], L'X');  // Commands
+    CHECK(idx >= 0);
+    if (idx >= 0) {
+        const auto& item = menus[2].items[static_cast<size_t>(idx)];
+        CHECK(item.label == L"Export listing");
+        CHECK(item.kind == MenuItemKind::ExportListing);
     }
 }
 
@@ -435,5 +522,188 @@ TEST_CASE(BuildMenus_CompareContentsIsAltF3_NotAStub_SRC008) {
         CHECK(item.label == L"Compare contents");
         CHECK(item.kind == MenuItemKind::SimulatedKey);
         CHECK(item.action.virtualKeyCode == VK_F3 && item.action.altHeld && !item.action.ctrlHeld);
+    }
+}
+
+// --- HandleMenuMouse (IS-0023) -------------------------------------------
+
+namespace {
+
+constexpr SHORT kWidth = 120;
+
+struct MouseRig {
+    const std::vector<TopMenu>& menus = BuildMenus();
+    std::vector<PlacedMenuEntry> bar = LayOutMenuBarRow(menus, kWidth);
+    MenuBarState state;
+
+    mc::MenuMouseResult Send(SHORT x, SHORT y, DWORD buttons, DWORD flags) {
+        return mc::HandleMenuMouse(state, menus, bar, kWidth, x, y, buttons, flags);
+    }
+    mc::MenuMouseResult Press(SHORT x, SHORT y, DWORD flags = 0) { return Send(x, y, FROM_LEFT_1ST_BUTTON_PRESSED, flags); }
+    mc::MenuMouseResult Release(SHORT x, SHORT y) { return Send(x, y, 0, 0); }
+    mc::MenuMouseResult Move(SHORT x, SHORT y, DWORD buttons = 0) { return Send(x, y, buttons, MOUSE_MOVED); }
+
+    SHORT EntryX(size_t i) const { return bar[i].col; }
+    DropdownLayout Dropdown(size_t i) const { return LayOutOpenDropdown(menus[i], bar[i].col, kWidth); }
+};
+
+}  // namespace
+
+TEST_CASE(HandleMenuMouse_ClickOpensAndTheReleaseKeepsItOpen_IS0023) {
+    MouseRig r;
+    CHECK(r.Press(r.EntryX(0), 0).effect == mc::MenuMouseEffect::Consumed);
+    CHECK(r.state.active);
+    CHECK(r.state.openMenuIndex == 0);
+    CHECK(r.state.mouseDownOnBar);
+    CHECK(r.Release(r.EntryX(0), 0).effect == mc::MenuMouseEffect::Consumed);
+    CHECK(r.state.active);            // the release of the opening click must not close it
+    CHECK(!r.state.mouseDownOnBar);
+}
+
+TEST_CASE(HandleMenuMouse_MovesNeverCloseTheMenu_IS0023) {
+    MouseRig r;
+    r.Press(r.EntryX(2), 0);
+    DropdownLayout d = r.Dropdown(2);
+    for (int i = 0; i < 100; ++i) {
+        SHORT x = static_cast<SHORT>(i % 120), y = static_cast<SHORT>(i % 30);
+        r.Move(x, y, (i % 2) ? FROM_LEFT_1ST_BUTTON_PRESSED : 0);
+        CHECK(r.state.active);
+    }
+    r.Move(d.col, d.itemRows[0], FROM_LEFT_1ST_BUTTON_PRESSED);
+    CHECK(r.state.active);
+    CHECK(r.state.openMenuIndex == 2);
+}
+
+TEST_CASE(HandleMenuMouse_RepeatedPressWhileHeldIsIgnored_IS0023) {
+    MouseRig r;
+    r.Press(r.EntryX(1), 0);
+    r.Press(r.EntryX(1), 0);                                    // the held button re-reported
+    r.Press(r.EntryX(1), 0, DOUBLE_CLICK);
+    CHECK(r.state.active);
+    CHECK(r.state.openMenuIndex == 1);
+    r.Release(r.EntryX(1), 0);
+    CHECK(r.state.active);
+}
+
+TEST_CASE(HandleMenuMouse_HoverHighlightsTheItemUnderThePointer_IS0023) {
+    MouseRig r;
+    r.Press(r.EntryX(0), 0);
+    r.Release(r.EntryX(0), 0);
+    DropdownLayout d = r.Dropdown(0);
+    r.Move(d.col, d.itemRows[2]);
+    CHECK(r.state.highlightedItemIndex == 2);
+    r.Move(0, 25);                                              // outside: the highlight stays
+    CHECK(r.state.highlightedItemIndex == 2);
+    CHECK(r.state.active);
+}
+
+TEST_CASE(HandleMenuMouse_PressOnAnItemActivatesItAndCloses_IS0023) {
+    MouseRig r;
+    r.Press(r.EntryX(3), 0);
+    r.Release(r.EntryX(3), 0);
+    DropdownLayout d = r.Dropdown(3);
+    mc::MenuMouseResult res = r.Press(d.col, d.itemRows[1]);
+    CHECK(res.effect == mc::MenuMouseEffect::Activate);
+    CHECK(res.menuIndex == 3);
+    CHECK(res.itemIndex == 1);
+    CHECK(!r.state.active);
+}
+
+TEST_CASE(HandleMenuMouse_PressDragReleaseOntoAnItemActivatesIt_IS0023) {
+    MouseRig r;
+    r.Press(r.EntryX(0), 0);
+    DropdownLayout d = r.Dropdown(0);
+    r.Move(d.col, d.itemRows[3], FROM_LEFT_1ST_BUTTON_PRESSED);
+    mc::MenuMouseResult res = r.Release(d.col, d.itemRows[3]);
+    CHECK(res.effect == mc::MenuMouseEffect::Activate);
+    CHECK(res.menuIndex == 0);
+    CHECK(res.itemIndex == 3);
+    CHECK(!r.state.active);
+}
+
+TEST_CASE(HandleMenuMouse_ReleaseAwayFromTheMenuAfterADragClosesIt_IS0023) {
+    MouseRig r;
+    r.Press(r.EntryX(0), 0);
+    r.Move(5, 28, FROM_LEFT_1ST_BUTTON_PRESSED);
+    CHECK(r.Release(5, 28).effect == mc::MenuMouseEffect::Consumed);
+    CHECK(!r.state.active);
+}
+
+TEST_CASE(HandleMenuMouse_ClickAwayToggleAndSwitch_IS0023) {
+    MouseRig r;
+    r.Press(r.EntryX(0), 0);
+    r.Release(r.EntryX(0), 0);
+    // another entry switches menus (and arms its own release)
+    r.Press(r.EntryX(2), 0);
+    CHECK(r.state.active);
+    CHECK(r.state.openMenuIndex == 2);
+    r.Release(r.EntryX(2), 0);
+    // the open entry again closes it
+    CHECK(r.Press(r.EntryX(2), 0).effect == mc::MenuMouseEffect::Consumed);
+    CHECK(!r.state.active);
+    r.Release(r.EntryX(2), 0);
+    // a press elsewhere closes and is consumed
+    r.Press(r.EntryX(1), 0);
+    r.Release(r.EntryX(1), 0);
+    CHECK(r.Press(2, 20).effect == mc::MenuMouseEffect::Consumed);
+    CHECK(!r.state.active);
+}
+
+TEST_CASE(HandleMenuMouse_WheelAndRightPressClose_IS0023) {
+    MouseRig r;
+    r.Press(r.EntryX(0), 0);
+    r.Release(r.EntryX(0), 0);
+    CHECK(r.Send(10, 10, 0, MOUSE_WHEELED).effect == mc::MenuMouseEffect::Consumed);
+    CHECK(!r.state.active);
+    r.Press(r.EntryX(0), 0);
+    r.Release(r.EntryX(0), 0);
+    CHECK(r.Send(10, 10, RIGHTMOST_BUTTON_PRESSED, 0).effect == mc::MenuMouseEffect::Consumed);
+    CHECK(!r.state.active);
+}
+
+TEST_CASE(HandleMenuMouse_ClosedMenuLeavesOtherEventsAlone_IS0023) {
+    MouseRig r;
+    CHECK(r.Press(10, 10).effect == mc::MenuMouseEffect::NotForMenu);
+    CHECK(r.Release(10, 10).effect == mc::MenuMouseEffect::NotForMenu);
+    CHECK(r.Move(10, 10).effect == mc::MenuMouseEffect::NotForMenu);
+    CHECK(r.Send(10, 10, 0, MOUSE_WHEELED).effect == mc::MenuMouseEffect::NotForMenu);
+    CHECK(!r.state.active);
+    // a press on the bar itself is the bar's, even where no entry is
+    CHECK(r.Press(kWidth - 1, 0).effect == mc::MenuMouseEffect::Consumed);
+    CHECK(!r.state.active);
+}
+
+TEST_CASE(HandleMenuMouse_DoubleClickPressOnTheBarActsAsAPress_IS0023) {
+    MouseRig r;
+    r.Press(r.EntryX(0), 0, DOUBLE_CLICK);
+    CHECK(r.state.active);
+    r.Release(r.EntryX(0), 0);
+    r.Press(r.EntryX(0), 0, DOUBLE_CLICK);                      // second click of a quick pair toggles it closed
+    CHECK(!r.state.active);
+}
+
+TEST_CASE(HandleMenuMouse_LostReleaseDoesNotLeaveTheMenuStuck_IS0023) {
+    MouseRig r;
+    r.Press(r.EntryX(0), 0);
+    CHECK(r.state.mouseDownOnBar);
+    r.Move(r.EntryX(0), 0, 0);                                  // a move with no button down: the release was lost
+    CHECK(!r.state.mouseDownOnBar);
+    CHECK(r.state.active);
+    r.Press(r.EntryX(0), 0);                                    // so the next click works (toggles it closed)
+    CHECK(!r.state.active);
+}
+
+TEST_CASE(HandleMenuMouse_ClippedBarOnlyHitsPlacedEntries_IS0023) {
+    const auto& menus = BuildMenus();
+    std::vector<PlacedMenuEntry> narrow = LayOutMenuBarRow(menus, 20);
+    CHECK(narrow.size() < menus.size());  // the bar does not fit every entry at this width
+    for (SHORT x = 0; x < 20; ++x) {
+        bool covered = false;
+        for (const auto& e : narrow)
+            if (x >= e.col && x < static_cast<SHORT>(e.col + e.width)) covered = true;
+        MenuBarState state;
+        mc::MenuMouseResult res = mc::HandleMenuMouse(state, menus, narrow, 20, x, 0, FROM_LEFT_1ST_BUTTON_PRESSED, 0);
+        CHECK(res.effect == mc::MenuMouseEffect::Consumed);
+        CHECK(state.active == covered);  // an omitted or blank spot opens nothing
     }
 }

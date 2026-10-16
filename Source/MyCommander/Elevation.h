@@ -13,14 +13,22 @@
 namespace mc {
 
 // SEC-003: the one operation an elevated helper invocation performs.
-enum class ElevatedAction { Copy, Move, DeletePermanent, ToggleAttribute };
+// SetVolumeLabel: NAV-013 (Disk Label on a fixed/system drive).
+// ShareFolder/UnshareFolder: NAV-015 (creating/removing an SMB share always
+// needs admin rights, so these are never attempted unelevated first the way
+// SetVolumeLabel/ToggleAttribute are -- see NetShares.h).
+enum class ElevatedAction { Copy, Move, DeletePermanent, ToggleAttribute, SetVolumeLabel, ShareFolder, UnshareFolder };
 
 struct ElevatedRequest {
     ElevatedAction action;
-    std::filesystem::path source;                            // all actions
+    std::filesystem::path source;                            // all actions; SetVolumeLabel: the volume root;
+                                                               // ShareFolder: the folder to share
     std::filesystem::path destination;                       // Copy/Move only
     bool overwrite = false;                                   // Move only
     FileAttributeFlag attributeFlag = FileAttributeFlag::ReadOnly;  // ToggleAttribute only
+    std::wstring text;           // SetVolumeLabel: the new label. Share/UnshareFolder: the share name.
+    std::wstring description;    // ShareFolder: the share's remark/description
+    bool readOnly = false;       // ShareFolder: Everyone Read vs. Full access
 };
 
 // Encodes `request` as this same executable's own hidden command-line

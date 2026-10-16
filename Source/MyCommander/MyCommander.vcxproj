@@ -51,6 +51,7 @@
   </PropertyGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <ClCompile>
+      <MultiProcessorCompilation>true</MultiProcessorCompilation>
       <WarningLevel>Level4</WarningLevel>
       <SDLCheck>true</SDLCheck>
       <PreprocessorDefinitions>_DEBUG;_CONSOLE;UNICODE;_UNICODE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
@@ -69,6 +70,7 @@
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <ClCompile>
+      <MultiProcessorCompilation>true</MultiProcessorCompilation>
       <WarningLevel>Level4</WarningLevel>
       <FunctionLevelLinking>true</FunctionLevelLinking>
       <IntrinsicFunctions>true</IntrinsicFunctions>
@@ -103,6 +105,11 @@
     <ClCompile Include="ContentSearch.cpp" />
     <ClCompile Include="DirCompare.cpp" />
     <ClCompile Include="DirSync.cpp" />
+    <ClCompile Include="FolderWatch.cpp" />
+    <ClCompile Include="PauseToken.cpp" />
+    <ClCompile Include="RecentLocations.cpp" />
+    <ClCompile Include="EmptyFolders.cpp" />
+    <ClCompile Include="Labels.cpp" />
     <ClCompile Include="TextDiff.cpp" />
     <ClCompile Include="DiffViewer.cpp" />
     <ClCompile Include="KeyMap.cpp" />
@@ -120,6 +127,26 @@
     <ClCompile Include="Session.cpp" />
     <ClCompile Include="TextFile.cpp" />
     <ClCompile Include="HexDump.cpp" />
+    <ClCompile Include="Clipboard.cpp" />
+    <ClCompile Include="DiskUsage.cpp" />
+    <ClCompile Include="ExplorerReveal.cpp" />
+    <ClCompile Include="PathCompletion.cpp" />
+    <ClCompile Include="Shortcut.cpp" />
+    <ClCompile Include="HistorySearch.cpp" />
+    <ClCompile Include="ListingExport.cpp" />
+    <ClCompile Include="FolderSize.cpp" />
+    <ClCompile Include="ClipboardPaste.cpp" />
+    <ClCompile Include="SecureDelete.cpp" />
+    <ClCompile Include="RecycleBin.cpp" />
+    <ClCompile Include="UndoJournal.cpp" />
+    <ClCompile Include="PluginProviderAdapter.cpp" />
+    <ClCompile Include="ProviderCopy.cpp" />
+    <ClCompile Include="MemoryProvider.cpp" />
+    <ClCompile Include="LocalProvider.cpp" />
+    <ClCompile Include="FileProvider.cpp" />
+    <ClCompile Include="CheckSum.cpp" />
+    <ClCompile Include="NetDrives.cpp" />
+    <ClCompile Include="NetShares.cpp" />
     <ClCompile Include="DirectoryTree.cpp" />
     <ClCompile Include="OperationQueue.cpp" />
     <ClCompile Include="JobWorker.cpp" />
@@ -138,6 +165,11 @@
     <ClInclude Include="ContentSearch.h" />
     <ClInclude Include="DirCompare.h" />
     <ClInclude Include="DirSync.h" />
+    <ClInclude Include="FolderWatch.h" />
+    <ClInclude Include="PauseToken.h" />
+    <ClInclude Include="RecentLocations.h" />
+    <ClInclude Include="EmptyFolders.h" />
+    <ClInclude Include="Labels.h" />
     <ClInclude Include="TextDiff.h" />
     <ClInclude Include="DiffViewer.h" />
     <ClInclude Include="KeyMap.h" />
@@ -154,6 +186,7 @@
     <ClInclude Include="Navigation.h" />
     <ClInclude Include="PathUtil.h" />
     <ClInclude Include="PluginManager.h" />
+    <ClInclude Include="..\MyCommanderPluginSdk\McFileSystem.h" />
     <ClInclude Include="..\MyCommanderPluginSdk\McPluginAbi.h" />
     <ClInclude Include="..\MyCommanderPluginSdk\McPluginHost.h" />
     <ClInclude Include="..\MyCommanderPluginSdk\McPluginTypes.h" />
@@ -163,6 +196,26 @@
     <ClInclude Include="Strings.h" />
     <ClInclude Include="TextFile.h" />
     <ClInclude Include="HexDump.h" />
+    <ClInclude Include="Clipboard.h" />
+    <ClInclude Include="DiskUsage.h" />
+    <ClInclude Include="ExplorerReveal.h" />
+    <ClInclude Include="PathCompletion.h" />
+    <ClInclude Include="Shortcut.h" />
+    <ClInclude Include="HistorySearch.h" />
+    <ClInclude Include="ListingExport.h" />
+    <ClInclude Include="FolderSize.h" />
+    <ClInclude Include="ClipboardPaste.h" />
+    <ClInclude Include="SecureDelete.h" />
+    <ClInclude Include="RecycleBin.h" />
+    <ClInclude Include="UndoJournal.h" />
+    <ClInclude Include="PluginProviderAdapter.h" />
+    <ClInclude Include="ProviderCopy.h" />
+    <ClInclude Include="MemoryProvider.h" />
+    <ClInclude Include="LocalProvider.h" />
+    <ClInclude Include="FileProvider.h" />
+    <ClInclude Include="CheckSum.h" />
+    <ClInclude Include="NetDrives.h" />
+    <ClInclude Include="NetShares.h" />
     <ClInclude Include="DirectoryTree.h" />
     <ClInclude Include="OperationQueue.h" />
     <ClInclude Include="JobWorker.h" />

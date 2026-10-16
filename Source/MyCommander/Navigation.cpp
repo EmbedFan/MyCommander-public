@@ -95,4 +95,22 @@ int MatchClickRegion(const std::vector<ClickableRegion>& regions, SHORT mouseX, 
     return -1;
 }
 
+BriefLayout ComputeBriefLayout(int visibleRows, SHORT width, SHORT longestNameWidth) {
+    SHORT halfWidth = static_cast<SHORT>(std::max<SHORT>(1, static_cast<SHORT>(width / 2)));
+    int columnWidth = std::max<int>(12, std::min<int>(longestNameWidth, halfWidth));
+    int columns = std::max(1, static_cast<int>(width) / columnWidth);
+    (void)visibleRows;  // not part of the per-screen column count, only of the page size (BriefFirstVisible)
+    return BriefLayout{columns, columnWidth};
+}
+
+int BriefEntryAt(int firstVisible, int rows, int col, int row) {
+    return firstVisible + col * std::max(1, rows) + row;
+}
+
+int BriefFirstVisible(int cursor, int columns, int rows) {
+    int page = std::max(1, columns) * std::max(1, rows);
+    if (cursor < 0) return 0;
+    return (cursor / page) * page;
+}
+
 }  // namespace mc

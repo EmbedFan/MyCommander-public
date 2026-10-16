@@ -88,6 +88,11 @@ public:
                                     std::wstring& error) override;
     remote::Status RenameRemote(const std::wstring& from, const std::wstring& to, const remote::CancelFn& cancel,
                                 std::wstring& error) override;
+    // Not part of remote::Client (the panel never creates links); used by the
+    // integration harness's symlink check. Argument order follows libssh2 /
+    // OpenSSH: `target` is what the new link at `linkPath` points to.
+    remote::Status MakeRemoteSymlink(const std::wstring& target, const std::wstring& linkPath,
+                                     const remote::CancelFn& cancel, std::wstring& error);
 
     // For the keyboard-interactive callback (libssh2 calls a plain C function).
     void AnswerPrompts(const std::string& name, const std::string& instruction, int count, const void* promptData,

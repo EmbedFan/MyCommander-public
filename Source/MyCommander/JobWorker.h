@@ -2,6 +2,7 @@
 
 #include "FileOps.h"
 #include "OperationQueue.h"
+#include "PauseToken.h"
 
 #include <atomic>
 #include <condition_variable>
@@ -52,6 +53,17 @@ public:
     // False for a finished or unknown job.
     bool Cancel(uint64_t id);
 
+    // FOP-015: pauses a Running (or WaitingForAnswer) job at its next item or
+    // progress tick, and resumes it. A paused job keeps its volume and paths, so
+    // nothing overlapping starts. False for a queued, finished or unknown job,
+    // or one already in the requested state. A Queued job is left alone: it has
+    // not started, so there is nothing to pause (it can be cancelled instead).
+    bool Pause(uint64_t id);
+    bool Resume(uint64_t id);
+    // Pauses / resumes every job that can be; returns how many changed.
+    int PauseAll();
+    int ResumeAll();
+
     std::vector<Job> Jobs() const;
 
     // FOP-014 completion: the first active job using any of `paths`
@@ -74,6 +86,7 @@ private:
     std::condition_variable cv_;
     OperationQueue queue_;
     std::map<uint64_t, std::shared_ptr<std::atomic<bool>>> cancelFlags_;
+    std::map<uint64_t, std::shared_ptr<PauseToken>> pauseTokens_;
     std::vector<HANDLE> threads_;  // Win32 threads: see JobWorker.cpp for why not std::thread
     std::vector<PromptSlot> prompts_;
     uint64_t nextPromptSeq_ = 1;

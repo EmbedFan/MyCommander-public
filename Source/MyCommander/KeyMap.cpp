@@ -181,7 +181,7 @@ bool IsTypingChord(const KeyChord& chord) {
 }
 
 bool IsMenuChord(const KeyChord& chord) {
-    if (!chord.alt || chord.ctrl) return false;
+    if (!chord.alt || chord.ctrl || chord.shift) return false;  // Alt+Shift+<letter> is a command (FOP-025)
     switch (chord.vk) {
         case 'F': case 'S': case 'C': case 'N': case 'V': case 'E':
             return true;
@@ -213,6 +213,7 @@ const std::vector<CommandInfo>& Commands() {
         {I::SortExtension, L"sort-extension", L"Sort by extension (again: reverse)", {K(VK_F4, C)}},
         {I::SortSize, L"sort-size", L"Sort by size (again: reverse)", {K(VK_F5, C)}},
         {I::SortTime, L"sort-time", L"Sort by modification time (again: reverse)", {K(VK_F6, C)}},
+        {I::SortAttributes, L"sort-attributes", L"Sort by attributes (again: reverse)", {K(VK_F9, C)}},
         {I::Copy, L"copy", L"Copy to the other panel", {K(VK_F5)}},
         {I::CopyAs, L"copy-as", L"Copy the cursor entry under a new name", {K(VK_F5, _, S)}},
         {I::QueueCopy, L"queue-copy", L"Copy in the background", {K(VK_F5, _, _, A)}},
@@ -253,6 +254,20 @@ const std::vector<CommandInfo>& Commands() {
          {K(VK_RETURN, C)}},
         {I::InsertPath, L"insert-path", L"Insert the cursor/selected full path(s) into the command line",
          {K(VK_RETURN, C, S)}},
+        {I::DiskUsage, L"disk-usage", L"Calculate used disk space for the selection", {K(VK_RETURN, _, S, A)}},
+        {I::CopyNames, L"copy-names", L"Copy the selected names to the clipboard", {K('C', C, S)}},
+        {I::ViewFull, L"view-full", L"Full (detailed) panel view", {K(VK_F7, C)}},
+        {I::ViewBrief, L"view-brief", L"Brief (names only) panel view", {K(VK_F8, C)}},
+        {I::SwapPanels, L"swap-panels", L"Swap the left and right panels", {K('U', C)}},
+        {I::RecentFolders, L"recent-folders", L"Recently visited folders", {K(VK_F12, _, _, A)}},
+        {I::LargestFiles, L"largest-files", L"Find the largest files below this folder", {K(VK_F12, C)}},
+        {I::FindEmptyFolders, L"find-empty-folders", L"Find and remove empty folders", {K(VK_F7, _, S, A)}},
+        {I::CycleLabel, L"cycle-label", L"Cycle the colour label of the selection", {K('L', C)}},
+        {I::LabelMenu, L"label-menu", L"Colour labels: set, clear, select by label", {K('L', C, S)}},
+        {I::Undo, L"undo", L"Undo the last file operation", {K('Z', C)}},
+        {I::PasteFromExplorer, L"paste-from-explorer", L"Paste files copied or cut in Explorer", {K('V', _, S, A)}},
+        {I::ReverseSearch, L"reverse-search", L"Search the command history by a fragment", {K('R', _, _, A)}},
+        {I::CompletePath, L"complete-path", L"Complete the path typed on the command line", {K(VK_SPACE, C)}},
     };
     return commands;
 }

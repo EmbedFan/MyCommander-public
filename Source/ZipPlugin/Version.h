@@ -10,7 +10,7 @@
 // changes, mirroring Source/MyCommander/Version.h's own convention for the
 // host application.
 #define MCPLUGIN_VERSION_MAJOR 0
-#define MCPLUGIN_VERSION_MINOR 12
+#define MCPLUGIN_VERSION_MINOR 13
 #define MCPLUGIN_VERSION_PATCH 0
 #define MCPLUGIN_VERSION_BUILD 0
 

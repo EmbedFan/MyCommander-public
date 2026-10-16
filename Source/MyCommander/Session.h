@@ -12,6 +12,8 @@ struct SessionState {
     std::optional<std::filesystem::path> leftPath;
     std::optional<std::filesystem::path> rightPath;
     bool singlePanel = false;  // UI-013 Part A; absent from older files = dual-pane
+    bool leftBrief = false;    // UI-017; absent from older files = Full view
+    bool rightBrief = false;
 };
 
 // Separate from Config: the session file is read only after a previous clean

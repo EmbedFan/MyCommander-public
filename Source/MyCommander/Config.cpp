@@ -113,6 +113,28 @@ ColorTheme ParseColorTheme(const std::wstring& value, bool& ok) {
     return ColorTheme::Default;
 }
 
+// LIST-007: "off"/"on"/"poll" (case-insensitive); `ok` false for anything else.
+AutoRefreshMode ParseAutoRefreshMode(const std::wstring& value, bool& ok) {
+    std::wstring lower = ToLower(value);
+    ok = true;
+    if (lower == L"off") return AutoRefreshMode::Off;
+    if (lower == L"on") return AutoRefreshMode::On;
+    if (lower == L"poll") return AutoRefreshMode::Poll;
+    ok = false;
+    return AutoRefreshMode::On;
+}
+
+// LIST-007: an integer number of seconds in [1, 3600].
+int ParsePollSeconds(const std::wstring& value, bool& ok) {
+    ok = false;
+    if (value.empty()) return 10;
+    wchar_t* end = nullptr;
+    long parsed = std::wcstol(value.c_str(), &end, 10);
+    if (end != value.c_str() + value.size() || parsed < 1 || parsed > 3600) return 10;
+    ok = true;
+    return static_cast<int>(parsed);
+}
+
 // FEA-0002: parses a comma-separated, unordered list of plugin ids —
 // arbitrary strings (no fixed vocabulary to validate against, unlike
 // ParseColumnList's four known names), so this never fails: an empty value
@@ -202,6 +224,28 @@ const std::vector<ConfigKeyBlock>& ConfigKeyBlocks() {
          L"# persisted or not (CLI-007).\n"
          L"# Values: true / false (default: true)\n"
          L"persistCommandHistory = true\n"},
+        {L"showlabels",
+         L"# Draw the colour labels (Ctrl+L) in the panels (LIST-009). false hides the\n"
+         L"# colour and the label number without removing any label.\n"
+         L"# Values: true / false (default: true)\n"
+         L"showLabels = true\n"},
+        {L"showshares",
+         L"# Mark folders that are shared on the network with a '>' before their name\n"
+         L"# (LIST-013). The share list is read from Windows, no administrator rights.\n"
+         L"# Values: true / false (default: true)\n"
+         L"showShares = true\n"},
+        {L"sharerefreshseconds",
+         L"# How often the '>' marks are refreshed, in seconds, so a share made in\n"
+         L"# Explorer shows up (LIST-013). 0 = only after Share/Unshare Folder and when a\n"
+         L"# panel re-lists.\n"
+         L"# Values: 0 to 3600 (default: 3)\n"
+         L"shareRefreshSeconds = 3\n"},
+        {L"persistrecentfolders",
+         L"# Remember the recently visited folders (Alt+F12) between runs, in\n"
+         L"# %APPDATA%\\MyCommander\\recent-folders.txt (NAV-017). false keeps the list\n"
+         L"# for the current session only and writes nothing.\n"
+         L"# Values: true / false (default: true)\n"
+         L"persistRecentFolders = true\n"},
         {L"loglevel",
          L"# Diagnostic log severity (ERR-004). Off by default -- no log file is\n"
          L"# written at all until you opt in. Each level also includes every level\n"
@@ -272,6 +316,28 @@ const std::vector<ConfigKeyBlock>& ConfigKeyBlocks() {
          L"# Shift+Alt+F3 always opens the built-in viewer.\n"
          L"# Values: a command line, or empty (default: empty = built-in viewer)\n"
          L"diffProgram = \n"},
+        {L"autorefresh",
+         L"# LIST-007: re-list a panel automatically when its folder is changed from\n"
+         L"# outside MyCommander (Explorer, another program). Your selection and cursor\n"
+         L"# are kept.\n"
+         L"#   on   - use Windows change notifications (default)\n"
+         L"#   poll - also re-list every autoRefreshPollSeconds where notifications\n"
+         L"#          are unavailable (some network shares)\n"
+         L"#   off  - refresh only on Ctrl+R or after your own operations\n"
+         L"# Values: off / on / poll (default: on)\n"
+         L"autoRefresh = on\n"},
+        {L"autorefreshpollseconds",
+         L"# Seconds between re-lists in autoRefresh = poll mode (LIST-007).\n"
+         L"# Values: an integer, 1-3600 (default: 10)\n"
+         L"autoRefreshPollSeconds = 10\n"},
+        {L"foldersizes",
+         L"# LIST-010: show each folder's total size (all files below it) in the Size\n"
+         L"# column instead of <DIR>. Measured in the background, only for the folders\n"
+         L"# on screen: \"...\" while measuring, a trailing \"?\" if part of the tree\n"
+         L"# could not be read. Reading a large tree costs disk time, so it is off by\n"
+         L"# default. A change deep inside a folder shows after the next refresh.\n"
+         L"# Values: on / off (default: off)\n"
+         L"folderSizes = off\n"},
     };
     return blocks;
 }
@@ -343,6 +409,24 @@ LoadConfigResult LoadConfigFrom(const std::filesystem::path& path) {
         } else if (key == L"persistcommandhistory") {
             bool parsed = ParseBool(value, ok);
             if (ok) result.config.persistCommandHistory = parsed;
+        } else if (key == L"showlabels") {
+            bool parsed = ParseBool(value, ok);
+            if (ok) result.config.showLabels = parsed;
+        } else if (key == L"showshares") {
+            bool parsed = ParseBool(value, ok);
+            if (ok) result.config.showShares = parsed;
+        } else if (key == L"sharerefreshseconds") {
+            expected = L"an integer from 0 to 3600";
+            ok = false;
+            wchar_t* end = nullptr;
+            long parsed = value.empty() ? -1 : std::wcstol(value.c_str(), &end, 10);
+            if (!value.empty() && end == value.c_str() + value.size() && parsed >= 0 && parsed <= 3600) {
+                ok = true;
+                result.config.shareRefreshSeconds = static_cast<int>(parsed);
+            }
+        } else if (key == L"persistrecentfolders") {
+            bool parsed = ParseBool(value, ok);
+            if (ok) result.config.persistRecentFolders = parsed;
         } else if (key == L"loglevel") {
             expected = L"off/error/warning/info/debug";
             LogLevel parsed = LogLevel::Off;
@@ -377,6 +461,20 @@ LoadConfigResult LoadConfigFrom(const std::filesystem::path& path) {
         } else if (key == L"diffprogram") {
             ok = true;
             result.config.diffProgram = value;
+        } else if (key == L"autorefresh") {
+            expected = L"off/on/poll";
+            AutoRefreshMode parsed = ParseAutoRefreshMode(value, ok);
+            if (ok) result.config.autoRefresh = parsed;
+        } else if (key == L"foldersizes") {
+            // on/off (the documented form) as well as the usual true/false/yes/no/1/0
+            const std::wstring lowered = ToLower(value);
+            bool parsed = lowered == L"on" ? true : lowered == L"off" ? false : ParseBool(value, ok);
+            if (lowered == L"on" || lowered == L"off") ok = true;
+            if (ok) result.config.folderSizes = parsed;
+        } else if (key == L"autorefreshpollseconds") {
+            expected = L"an integer from 1 to 3600";
+            int parsed = ParsePollSeconds(value, ok);
+            if (ok) result.config.autoRefreshPollSeconds = parsed;
         } else {
             continue;  // CFG-004: unrecognized key, ignored rather than blocking startup
         }

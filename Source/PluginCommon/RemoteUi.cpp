@@ -40,17 +40,6 @@ std::wstring FormatSize(uint64_t bytes) {
     return buffer;
 }
 
-std::wstring FormatTime(uint64_t fileTimeUtc) {
-    if (fileTimeUtc == 0) return L"";
-    FILETIME utc{static_cast<DWORD>(fileTimeUtc & 0xFFFFFFFF), static_cast<DWORD>(fileTimeUtc >> 32)};
-    FILETIME local{};
-    SYSTEMTIME st{};
-    if (!FileTimeToLocalFileTime(&utc, &local) || !FileTimeToSystemTime(&local, &st)) return L"";
-    wchar_t buffer[32];
-    swprintf_s(buffer, L"%04u-%02u-%02u %02u:%02u", st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute);
-    return buffer;
-}
-
 bool WildcardMatch(const wchar_t* name, const wchar_t* pattern) {
     if (!*pattern) return !*name;
     if (*pattern == L'*') return WildcardMatch(name, pattern + 1) || (*name && WildcardMatch(name + 1, pattern));

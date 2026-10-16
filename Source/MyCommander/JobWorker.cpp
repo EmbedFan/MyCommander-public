@@ -42,6 +42,7 @@ JobWorker::~JobWorker() {
         std::lock_guard<std::mutex> lock(mutex_);
         shuttingDown_ = true;
         for (auto& entry : cancelFlags_) entry.second->store(true);
+        for (auto& entry : pauseTokens_) entry.second->Resume();  // a paused worker must see the cancel
         cv_.notify_all();
     }
     // Joining outside the lock: a finishing worker takes the lock itself.
@@ -64,6 +65,7 @@ uint64_t JobWorker::Enqueue(Job job) {
     std::lock_guard<std::mutex> lock(mutex_);
     uint64_t id = queue_.Enqueue(std::move(job));
     cancelFlags_[id] = std::make_shared<std::atomic<bool>>(false);
+    pauseTokens_[id] = std::make_shared<PauseToken>();
     StartRunnableLocked();
     return id;
 }
@@ -73,12 +75,84 @@ bool JobWorker::Cancel(uint64_t id) {
     if (queue_.CancelQueued(id)) return true;
     for (const Job& job : queue_.Jobs()) {
         if (job.id != id) continue;
-        if (job.state != JobState::Running && job.state != JobState::WaitingForAnswer) return false;
+        if (job.state != JobState::Running && job.state != JobState::WaitingForAnswer &&
+            job.state != JobState::Paused)
+            return false;
         cancelFlags_[id]->store(true);
+        // Cancel wins over a pause: wake the worker out of its pause wait.
+        pauseTokens_[id]->Resume();
         cv_.notify_all();
         return true;
     }
     return false;
+}
+
+bool JobWorker::Pause(uint64_t id) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    for (const Job& job : queue_.Jobs()) {
+        if (job.id != id) continue;
+        if (job.state == JobState::Running) {
+            pauseTokens_[id]->Pause();
+            queue_.SetState(id, JobState::Paused);
+            return true;
+        }
+        if (job.state == JobState::WaitingForAnswer) {
+            // The prompt stays pending and keeps its state; the worker pauses
+            // at its next poll once the prompt is answered.
+            pauseTokens_[id]->Pause();
+            return true;
+        }
+        return false;
+    }
+    return false;
+}
+
+bool JobWorker::Resume(uint64_t id) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    for (const Job& job : queue_.Jobs()) {
+        if (job.id != id) continue;
+        if (job.state == JobState::Paused) {
+            queue_.SetState(id, JobState::Running);
+            pauseTokens_[id]->Resume();
+            return true;
+        }
+        if (job.state == JobState::WaitingForAnswer && pauseTokens_[id]->Paused()) {
+            pauseTokens_[id]->Resume();
+            return true;
+        }
+        return false;
+    }
+    return false;
+}
+
+int JobWorker::PauseAll() {
+    std::vector<uint64_t> ids;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        for (const Job& job : queue_.Jobs()) {
+            if (job.state == JobState::Running ||
+                (job.state == JobState::WaitingForAnswer && !pauseTokens_[job.id]->Paused()))
+                ids.push_back(job.id);
+        }
+    }
+    int changed = 0;
+    for (uint64_t id : ids) changed += Pause(id) ? 1 : 0;
+    return changed;
+}
+
+int JobWorker::ResumeAll() {
+    std::vector<uint64_t> ids;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        for (const Job& job : queue_.Jobs()) {
+            if (job.state == JobState::Paused ||
+                (job.state == JobState::WaitingForAnswer && pauseTokens_[job.id]->Paused()))
+                ids.push_back(job.id);
+        }
+    }
+    int changed = 0;
+    for (uint64_t id : ids) changed += Resume(id) ? 1 : 0;
+    return changed;
 }
 
 std::vector<Job> JobWorker::Jobs() const {
@@ -153,10 +227,21 @@ void JobWorker::PublishProgress(uint64_t id, int done, int total) {
 void JobWorker::RunJob(Job job) {
     const uint64_t id = job.id;
     std::shared_ptr<std::atomic<bool>> cancel;
+    std::shared_ptr<PauseToken> pause;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         cancel = cancelFlags_[id];
+        pause = pauseTokens_[id];
     }
+    // FOP-015: the engines' cancel poll is the pause point. While paused it
+    // waits (cancel still wins); a job paused mid-file waits inside FileOps'
+    // progress routine, which keeps both file handles open.
+    auto isCancelled = [cancel]() { return cancel->load(); };
+    auto pausableCancel = [cancel, pause, isCancelled]() {
+        if (cancel->load()) return true;
+        if (pause->Paused()) pause->WaitWhilePaused(isCancelled);
+        return cancel->load();
+    };
     const int total = static_cast<int>(job.sources.size());
 
     ConflictHandler onConflict = [this, id, cancel](const std::filesystem::path& destination) {
@@ -165,7 +250,7 @@ void JobWorker::RunJob(Job job) {
     ErrorHandler onError = [this, id, cancel](const std::wstring& itemName, const std::wstring& message, DWORD) {
         return AwaitError(id, itemName, message, cancel);
     };
-    CancelPoll cancelPoll = [cancel]() { return cancel->load(); };
+    CancelPoll cancelPoll = pausableCancel;
 
     bool cancelled = false;
     bool anyFailure = false;
@@ -175,9 +260,10 @@ void JobWorker::RunJob(Job job) {
         const std::filesystem::path& folder = group.first;
         const std::vector<std::wstring>& names = group.second;
         const int groupBase = doneSoFar;
-        ItemStartHandler onItemStart = [this, id, cancel, groupBase, total](const std::wstring&, int doneCount, int) {
+        ItemStartHandler onItemStart = [this, id, pausableCancel, groupBase, total](const std::wstring&, int doneCount,
+                                                                                    int) {
             PublishProgress(id, groupBase + doneCount, total);
-            return !cancel->load();
+            return !pausableCancel();
         };
 
         OperationOutcome outcome;
@@ -233,7 +319,8 @@ ConflictAskResult JobWorker::AwaitConflict(uint64_t jobId, const std::filesystem
     PromptSlot* s = FindPromptLocked(seq);
     if (s && s->answered) result = s->conflict;
     RemovePromptLocked(seq);
-    queue_.SetState(jobId, JobState::Running);
+    // FOP-015: paused while the prompt was open -> back to Paused, not Running.
+    queue_.SetState(jobId, pauseTokens_[jobId]->Paused() ? JobState::Paused : JobState::Running);
     return result;
 }
 
@@ -260,7 +347,8 @@ ErrorAskResult JobWorker::AwaitError(uint64_t jobId, const std::wstring& itemNam
     PromptSlot* s = FindPromptLocked(seq);
     if (s && s->answered) result = s->error;
     RemovePromptLocked(seq);
-    queue_.SetState(jobId, JobState::Running);
+    // FOP-015: paused while the prompt was open -> back to Paused, not Running.
+    queue_.SetState(jobId, pauseTokens_[jobId]->Paused() ? JobState::Paused : JobState::Running);
     return result;
 }
 

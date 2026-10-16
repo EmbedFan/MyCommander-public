@@ -741,6 +741,9 @@ Status Client::Download(const std::wstring& remotePath, const std::wstring& loca
             error = L"Cancelled.";
             break;
         }
+        // cppcheck cannot resolve ssize_t in the HAVE_SSIZE_T configuration; MSVC gets it from libssh2.h's
+        // `typedef SSIZE_T ssize_t`, so this line is compiled and the result is checked below.
+        // cppcheck-suppress ConfigurationNotChecked
         ssize_t got = 0;
         rc = Wait([&] {
             got = libssh2_sftp_read(handle, buffer.data(), buffer.size());
@@ -809,6 +812,8 @@ Status Client::Upload(const std::wstring& localPath, const std::wstring& remoteP
         if (read == 0) break;
         size_t offset = 0;
         while (offset < read && status == Status::Ok) {
+            // As above: ssize_t comes from libssh2.h under MSVC; cppcheck cannot resolve it.
+            // cppcheck-suppress ConfigurationNotChecked
             ssize_t sent = 0;
             rc = Wait([&] {
                 sent = libssh2_sftp_write(handle, buffer.data() + offset, read - offset);
@@ -869,6 +874,18 @@ Status Client::RenameRemote(const std::wstring& from, const std::wstring& to, co
                                       LIBSSH2_SFTP_RENAME_ATOMIC | LIBSSH2_SFTP_RENAME_NATIVE);
     }, cancel);
     return rc == 0 ? Status::Ok : Fail(rc, from, error);
+}
+
+Status Client::MakeRemoteSymlink(const std::wstring& target, const std::wstring& linkPath,
+                                 const remote::CancelFn& cancel, std::wstring& error) {
+    if (!sftp_) return NotConnected(error);
+    Trace(L"symlink " + linkPath + L" -> " + target);
+    std::string t = WideToUtf8(target), l = WideToUtf8(linkPath);
+    int rc = Wait([&] {
+        return libssh2_sftp_symlink_ex(sftp_, t.c_str(), static_cast<unsigned int>(t.size()), l.data(),
+                                       static_cast<unsigned int>(l.size()), LIBSSH2_SFTP_SYMLINK);
+    }, cancel);
+    return rc == 0 ? Status::Ok : Fail(rc, linkPath, error);
 }
 
 }  // namespace sftp

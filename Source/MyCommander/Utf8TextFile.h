@@ -40,7 +40,7 @@ inline std::wstring Utf8ToWide(const std::string& bytes) {
 inline std::string WideToUtf8(const std::wstring& text) {
     if (text.empty()) return "";
     int len = WideCharToMultiByte(CP_UTF8, 0, text.data(), static_cast<int>(text.size()), nullptr, 0, nullptr, nullptr);
-    std::string out(static_cast<size_t>(std::max(len, 0)), '\0');
+    std::string out(static_cast<size_t>((std::max)(len, 0)), '\0');
     if (len > 0) WideCharToMultiByte(CP_UTF8, 0, text.data(), static_cast<int>(text.size()), out.data(), len, nullptr, nullptr);
     return out;
 }
@@ -59,8 +59,8 @@ inline std::wstring ReadUtf8TextFile(const std::filesystem::path& path) {
 
 // Writes `text` as UTF-8 (no BOM) via a temp file + MoveFileExW, the
 // Session/CommandHistory atomic-write precedent, creating the parent folder
-// if needed. False on any failure.
-inline bool WriteUtf8TextFileAtomic(const std::filesystem::path& path, const std::wstring& text) {
+// if needed. `withBom` (LIST-012: a CSV that Excel must read as UTF-8) prefixes EF BB BF. False on any failure.
+inline bool WriteUtf8TextFileAtomic(const std::filesystem::path& path, const std::wstring& text, bool withBom = false) {
     if (path.empty()) return false;
     std::error_code ec;
     std::filesystem::create_directories(path.parent_path(), ec);
@@ -70,6 +70,7 @@ inline bool WriteUtf8TextFileAtomic(const std::filesystem::path& path, const std
         std::ofstream out(temporary, std::ios::binary | std::ios::trunc);
         if (!out) return false;
         std::string bytes = WideToUtf8(text);
+        if (withBom) bytes.insert(0, "\xEF\xBB\xBF");
         out.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
         if (!out) return false;
     }

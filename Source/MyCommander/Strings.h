@@ -84,6 +84,7 @@ constexpr const wchar_t* kStrSortName = L"Name";
 constexpr const wchar_t* kStrSortExtension = L"Ext";
 constexpr const wchar_t* kStrSortSize = L"Size";
 constexpr const wchar_t* kStrSortDate = L"Date";
+constexpr const wchar_t* kStrSortAttributes = L"Attr";
 
 constexpr const wchar_t* kStrVolumeInfoUnavailable = L"Volume information unavailable";
 constexpr const wchar_t* kStrVolumeSpaceUnavailable = L"  space unavailable";
@@ -140,7 +141,95 @@ inline std::wstring FormatMinimumSize(int minWidth, int minHeight, int currentWi
 constexpr const wchar_t* kStrProgressLocationLabel = L"Location: ";
 constexpr const wchar_t* kStrProgressSourceLabel = L"Source: ";
 constexpr const wchar_t* kStrProgressDestinationLabel = L"Destination: ";
-constexpr const wchar_t* kStrEscToCancel = L"Esc to cancel";
+constexpr const wchar_t* kStrEscToCancel = L"Esc to cancel   P to pause";
+// SRC-010: largest files.
+constexpr const wchar_t* kStrLargestTitle = L"Largest files";
+constexpr const wchar_t* kStrLargestLocalOnly = L"The largest-files report works on a local folder only.";
+constexpr const wchar_t* kStrLargestCount = L"Number of files (1-10000)";
+constexpr const wchar_t* kStrLargestMinimum = L"Minimum size in bytes (blank = 0)";
+constexpr const wchar_t* kStrLargestMask = L"File name mask";
+constexpr const wchar_t* kStrLargestSubfolders = L"Include subfolders";
+constexpr const wchar_t* kStrLargestHidden = L"Include hidden and system files";
+constexpr const wchar_t* kStrLargestBadCount = L"Enter a whole number from 1 to 10000.";
+constexpr const wchar_t* kStrLargestBadMinimum = L"Enter a whole number of bytes, or leave it blank.";
+constexpr const wchar_t* kStrLargestNone = L"No files match.";
+constexpr const wchar_t* kStrLargestHint = L" Enter: go to  F3: view  Esc/F10: close";
+inline std::wstring FormatLargestHeader(size_t shown, size_t requested, size_t examined, bool cancelled) {
+    return L"Largest files (logical size): " + std::to_wstring(shown) + L" of " + std::to_wstring(requested) +
+           L" requested, " + std::to_wstring(examined) + L" files examined" + (cancelled ? L" -- cancelled" : L"");
+}
+// LIST-009: colour labels.
+constexpr const wchar_t* kStrLabelsTitle = L"Colour labels";
+constexpr const wchar_t* kStrLabelsLocalOnly = L"Colour labels belong to local files and folders.";
+constexpr const wchar_t* kStrLabelsFull = L"The label list is full (5,000 entries). Clear some labels first.";
+constexpr const wchar_t* kStrLabelsCannotSave = L"Could not save labels.conf.";
+constexpr const wchar_t* kStrLabelsNoneOnCursor = L"The cursor entry has no label.";
+constexpr const wchar_t* kStrLabelsClear = L"Clear label";
+constexpr const wchar_t* kStrLabelsSelectSame = L"Select entries with the cursor entry's label";
+constexpr const wchar_t* kStrLabelsCleanup = L"Remove labels of missing files in this folder";
+constexpr const wchar_t* kLabelNames[6] = {L"Red", L"Amber", L"Green", L"Cyan", L"Magenta", L"Gray"};
+inline std::wstring FormatLabelChoice(int number) {
+    return L"Set label " + std::to_wstring(number) + L" - " + kLabelNames[number - 1];
+}
+inline std::wstring FormatLabelsCleanedUp(size_t count) {
+    return count == 0 ? std::wstring(L"No labels of missing files in this folder.")
+                      : std::to_wstring(count) + L" label(s) of missing files removed.";
+}
+// SRC-009: find and remove empty folders.
+// NAV-019: show in Explorer.
+constexpr const wchar_t* kStrRevealTitle = L"Show in Explorer";
+constexpr const wchar_t* kStrRevealLocalOnly = L"Only an item in a local folder can be shown in Explorer.";
+constexpr const wchar_t* kStrRevealFirstOnly = L"Several items are selected; the first one is shown.";
+// FOP-026: create shortcuts.
+constexpr const wchar_t* kStrShortcutTitle = L"Create shortcut";
+constexpr const wchar_t* kStrShortcutLocalOnly = L"Shortcuts can be created for items in a local folder only.";
+constexpr const wchar_t* kStrShortcutVerb = L"Create shortcut";
+constexpr const wchar_t* kStrShortcutNoDesktop = L"The desktop folder could not be found.";
+constexpr const wchar_t* kStrShortcutNameTooLong = L"The shortcut name would be too long.";
+// LIST-012: export the listing.
+constexpr const wchar_t* kStrExportTitle = L"Export listing";
+constexpr const wchar_t* kStrExportLocalOnly = L"A listing can be exported from a local folder only.";
+constexpr const wchar_t* kStrExportNothing = L"There is nothing to export.";
+constexpr const wchar_t* kStrExportInsideFolder =
+    L"The output file must be outside the exported folder, so the export does not change what it lists.";
+constexpr const wchar_t* kStrExportNeedsName = L"Type the output file name.";
+constexpr const wchar_t* kStrExportCannotWrite = L"The file could not be written.";
+constexpr const wchar_t* kStrExportCapped = L"The listing was cut at 200,000 rows.";
+constexpr const wchar_t* kStrEmptyFoldersTitle = L"Find empty folders";
+constexpr const wchar_t* kStrEmptyFoldersLocalOnly = L"Empty folders can be searched for in a local folder only.";
+constexpr const wchar_t* kStrEmptyFoldersNone = L"No empty folders found.";
+constexpr const wchar_t* kStrEmptyFoldersHint = L"[Enter] go to  [Del] delete  [A] delete all  [Esc] close";
+inline std::wstring FormatEmptyFoldersScanning(const std::wstring& folder) { return L"Looking for empty folders: " + folder; }
+inline std::wstring FormatEmptyFoldersUnreadable(size_t count) {
+    return std::to_wstring(count) + L" folder(s) could not be read and were not checked.";
+}
+inline std::wstring FormatEmptyFoldersHeader(size_t count, bool truncated, size_t unreadable) {
+    std::wstring s = L"Empty folders: " + std::to_wstring(count) + (truncated ? L"+" : L"");
+    if (unreadable > 0) s += L"  (" + std::to_wstring(unreadable) + L" unreadable)";
+    return s;
+}
+inline std::wstring FormatEmptyFolderRow(const std::wstring& relative, size_t below) {
+    return relative + L"\\" + (below > 0 ? L"   (+" + std::to_wstring(below) + L" empty subfolders)" : std::wstring());
+}
+inline std::wstring FormatEmptyFoldersDeleteQuestion(size_t count) {
+    return L"Delete " + std::to_wstring(count) + (count == 1 ? L" empty folder" : L" empty folders") +
+           L" to the Recycle Bin?";
+}
+inline std::wstring FormatEmptyFoldersSkipped(size_t count) {
+    return std::to_wstring(count) + L" folder(s) were skipped: they are no longer empty.";
+}
+// NAV-017: recently visited folders.
+constexpr const wchar_t* kStrRecentTitle = L"Recent folders";
+constexpr const wchar_t* kStrRecentEmpty = L"No recent folders yet.";
+constexpr const wchar_t* kStrRecentHint = L"[Enter] go  [Del] remove  [F2] add to hotlist  [Esc] close";
+// NAV-016: swap panels.
+constexpr const wchar_t* kStrSwapPanelsTitle = L"Swap panels";
+constexpr const wchar_t* kStrSwapPanelsRefused = L"Both panels must show an ordinary folder.";
+constexpr const wchar_t* kStrSwapPanelsRefusedHint = L"Close the archive, server or tree view first.";
+// FOP-015: shown instead while the operation is paused.
+// FOP-015: the job queue list's hint line.
+constexpr const wchar_t* kStrJobsHint = L"Enter/Del: cancel   P: pause/resume   A: pause all   R: resume all   Esc: close";
+constexpr const wchar_t* kStrPausedHint = L"Paused -- P: resume, Esc: cancel";
 constexpr const wchar_t* kStrVerbMove = L"Move";
 constexpr const wchar_t* kStrVerbCopy = L"Copy";
 constexpr const wchar_t* kStrVerbMoving = L"Moving";
@@ -383,6 +472,37 @@ inline std::wstring FormatCannotVerbTitle(const std::wstring& verb) { return L"C
 
 constexpr const wchar_t* kStrPermanentlyDeleteTitle = L"Permanently delete?";
 constexpr const wchar_t* kStrDeleteTitle = L"Delete?";
+// FOP-022: undo.
+constexpr const wchar_t* kStrUndoTitle = L"Undo";
+constexpr const wchar_t* kStrUndoNothing = L"Nothing to undo.";
+constexpr const wchar_t* kStrUndoNothingHint = L"Undo covers this session's renames, moves, copies, deletes to the Recycle Bin, attribute changes and new folders/files.";
+constexpr const wchar_t* kStrUndoCheckNote = L"Undo checks size and time, not content.";
+constexpr const wchar_t* kStrUndoCopyNote = L"The copies go to the Recycle Bin.";
+constexpr const wchar_t* kStrUndoRefusedTail = L"This operation can no longer be undone and was dropped from the list.";
+constexpr const wchar_t* kStrUndoJobsBusy = L"A background job is using these items.";
+constexpr const wchar_t* kStrUndoDeleteNote = L"The items are restored from the Recycle Bin.";
+constexpr const wchar_t* kStrRestoreBinTitle = L"Restore from Recycle Bin";
+constexpr const wchar_t* kStrRestoreBinEmpty = L"The Recycle Bin is empty.";
+constexpr const wchar_t* kStrRestoreBinHint = L"[Enter] restore  [A] restore all  [Esc] close";
+constexpr const wchar_t* kStrPasteTitle = L"Paste from Explorer";
+constexpr const wchar_t* kStrPasteLocalOnly = L"Paste from Explorer works on local folders only.";
+constexpr const wchar_t* kStrPasteNoFiles = L"The clipboard holds no files. Copy or cut files in Explorer first.";
+constexpr const wchar_t* kStrPasteNothingToPaste = L"Nothing to paste:";
+constexpr const wchar_t* kStrPasteMoveQuestion = L"These files were cut in Explorer and will be MOVED here.";
+constexpr const wchar_t* kStrVerbPasteFromExplorer = L"Paste";
+constexpr const wchar_t* kStrSecureDeleteTitle = L"Secure delete?";
+constexpr const wchar_t* kStrSecureDeleteLocalOnly = L"Secure delete works on local folders only.";
+constexpr const wchar_t* kStrSecureDeleteIntro = L"Overwrites the content (zeros, then random data), then deletes permanently.";
+constexpr const wchar_t* kStrSecureDeleteLimitsHeading = L"This cannot be undone and does NOT guarantee erasure:";
+constexpr const wchar_t* kStrSecureDeleteLimitSsd = L"- SSDs and flash storage may remap writes, so old blocks can survive.";
+constexpr const wchar_t* kStrSecureDeleteLimitJournal = L"- Journals and copy-on-write file systems can keep old data.";
+constexpr const wchar_t* kStrSecureDeleteLimitCopies = L"- Shadow copies, backups, cloud sync and Recycle Bin copies are not touched.";
+constexpr const wchar_t* kStrSecureDeleteLimitCaches = L"- Other programs' caches and temporary copies are not searched.";
+constexpr const wchar_t* kStrSecureDeleteAdvice = L"For confidential data, use full-disk encryption (BitLocker).";
+constexpr const wchar_t* kStrSecureDeleteReadOnlyNote = L"Read-only files are made writable first. Links are removed as links.";
+constexpr const wchar_t* kStrVerbSecureDelete = L"Secure delete";
+constexpr const wchar_t* kStrVerbSecureDeleting = L"Secure deleting";
+constexpr const wchar_t* kStrUndoCleared = L"Undo list cleared: that operation cannot be undone.";
 constexpr const wchar_t* kStrWillBePermanentlyDeleted = L"will be PERMANENTLY deleted. This cannot be undone.";
 constexpr const wchar_t* kStrWillBeSentToRecycleBin = L"will be sent to the Recycle Bin.";
 constexpr const wchar_t* kStrYesLabel = L"es";
@@ -525,3 +645,30 @@ constexpr const wchar_t* kStrDiffTooDifferentLong =
 inline std::wstring FormatDiffProgress(size_t edits, size_t limit) {
     return L"Comparing files... " + std::to_wstring(edits) + L" / " + std::to_wstring(limit) + L" steps, Esc to cancel";
 }
+
+// --- main.cpp: file-system providers (EXT-002) ------------------------------
+
+constexpr const wchar_t* kStrProviderNotHere = L"Not available inside ";
+constexpr const wchar_t* kStrProviderNotHereHint = L"Leave it with \"..\" at its top folder, or copy the files out first.";
+constexpr const wchar_t* kStrProviderReadOnly = L"read-only";
+constexpr const wchar_t* kStrProviderVolumePrefix = L"[";
+constexpr const wchar_t* kStrProviderCannotWrite = L"This location is read-only.";
+constexpr const wchar_t* kStrProviderOnlyName = L"Enter a name only, without a folder.";
+constexpr const wchar_t* kStrProviderViewTitle = L"View";
+constexpr const wchar_t* kStrProviderViewFailed = L"Could not fetch the file for viewing.";
+constexpr const wchar_t* kStrProviderFetching = L"Fetching";
+inline std::wstring FormatNotInsideProvider(const std::wstring& where) { return kStrProviderNotHere + where + L"."; }
+constexpr const wchar_t* kStrProviderUnavailableTitle = L"Not available here";
+constexpr const wchar_t* kStrProviderSaveTitle = L"Save changes";
+constexpr const wchar_t* kStrProviderSaveQuestion = L"Save the changes before leaving?";
+constexpr const wchar_t* kStrProviderSaveFailedTitle = L"Save failed";
+constexpr const wchar_t* kStrDiscardLabel = L"on't save";  // hotkey D
+constexpr const wchar_t* kStrSaveLabel = L"ave";  // hotkey S
+constexpr const wchar_t* kStrProviderLeaveTitle = L"Leave";
+constexpr const wchar_t* kStrProviderLeaveQuestion = L"Leave ";
+constexpr const wchar_t* kStrProviderRelativeOnly = L"Enter a name or a path inside the current folder (no drive, leading slash, . or ..).";
+constexpr const wchar_t* kStrProviderCopyIntoItself = L"Cannot copy a folder into itself.";
+constexpr const wchar_t* kStrProviderNoContentSearch =
+    L"Inside an archive or on a server, Find Files searches names only -- leave \"Containing text\" empty.";
+constexpr const wchar_t* kStrProviderNoJobsHint =
+    L"Background jobs work on local folders; use F5 / F6 / F8 here (they run in the foreground).";

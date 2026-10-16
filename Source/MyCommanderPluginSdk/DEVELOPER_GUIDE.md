@@ -104,6 +104,8 @@ Every field of `McPluginMetadata`, returned by your one required export, `McPlug
   See "Panel content" under §5 below.
 - `kMcPluginCapServices` — informational only; `PublishService`/`QueryService` need no capability
   bit to call. See "Inter-plugin services" under §5 below.
+- `kMcPluginCapFileSystem` (API 1.12) — no export required; without it `OpenProvider` fails
+  (`false`, logged). See "File-system providers" under §6 below.
 
 Every string pointer in `McPluginMetadata` must stay valid for as long as your DLL is loaded —
 a string literal (the normal case) or a buffer you own and never free before `McPlugin_Shutdown`
@@ -427,7 +429,88 @@ host->RefreshPanel(other);
 re-entering the directory — the host has no other way to know your plugin touched that panel's
 own folder.
 
+### Navigating a panel (API 1.13)
+
+`bool NavigatePanel(McPanelSide side, const wchar_t* path)` makes a panel show a folder, like typing the path into the command line
+(history is kept; a folder that cannot be listed shows the usual banner). It returns `false` and changes nothing when `path` is empty or
+the panel currently shows plugin content or a provider. The Network Info plugin uses it to open a share in the other panel. On a host
+older than 1.13 the field is missing: check `host->structSize > offsetof(McPluginHost, NavigatePanel)` first.
+
+### File-system providers (API 1.12, `kMcPluginCapFileSystem`)
+
+If what your plugin shows **is files and folders** -- an archive, a server, a cloud store -- don't
+draw a panel yourself: make it a *provider* and let the host show it in its own panel. You answer a
+handful of calls ("list this folder", "read this file", "write that one"); the host brings
+everything else: the column layout, sorting (Ctrl+F3..F6), the quick filter (Ctrl+F), Brief view,
+selection, F3 view, F5/F6 copy and move **between any two panels** (local folder, your provider,
+another plugin's provider), F7, F8, F2, Shift+F5, Ctrl+A, conflict prompts, the progress box, Esc,
+pause, compare and synchronize folders (Shift+F2 / Ctrl+Shift+F2), compare files (Alt+F3) and
+find by name (Alt+F7). The ZIP, FTP and SFTP plugins are all providers.
+
+The table is `McFsProvider` (`McFileSystem.h`, included by `McPluginHost.h`). Fill it and hand it
+over, typically from a menu command or from `McPlugin_EnterArchive`:
+
+```cpp
+McFsProvider t{};
+t.structSize = sizeof(McFsProvider);
+t.context = session;                 // yours; handed back to every call
+t.capabilities = kMcFsCapRead | kMcFsCapWrite | kMcFsCapMkdir | kMcFsCapDelete | kMcFsCapRename;
+t.displayRoot = L"demo://example";   // shown before the path in the panel header
+t.kind = L"demo";                    // the volume line shows "[demo]"
+t.rootPath = L"/";                   // paths are rootPath + names joined with `separator`
+t.separator = L'/';
+t.List = &MyList;                    // required
+t.Stat = &MyStat;                    // required: one entry, or kMcFsNotFound
+t.OpenRead = &MyOpenRead; t.Read = &MyRead; t.CloseRead = &MyCloseRead;              // kMcFsCapRead
+t.OpenWrite = &MyOpenWrite; t.Write = &MyWrite; t.FinishWrite = &MyFinish; t.AbortWrite = &MyAbort;  // kMcFsCapWrite
+t.MakeDirectory = &MyMkdir; t.Delete = &MyDelete; t.Rename = &MyRename;
+t.Close = &MyClose;                  // required: free `context`
+if (!host->OpenProvider(host->GetActiveSide(), &t, L"/", nullptr)) MyClose(session);
+```
+
+The rules worth knowing:
+
+- **Ownership.** `OpenProvider` returning true means the host copied the table and owns the
+  provider: it calls `Close` exactly once -- when the panel leaves it (`..` at the top folder, Back,
+  a drive or hotlist jump), when you call `host->CloseProvider(side)`, or at shutdown -- and nothing
+  after that. Returning false means nothing was taken over: free `context` yourself. The panel lists
+  your root *during* `OpenProvider`, so the table must be ready before you call it.
+- **Entries** go out through the sink callback, one `McFsEntry` per call, strings borrowed only for
+  that call. A name never contains a separator (the host drops such entries). `isLink` with
+  `isDirectory` is a link to a folder: the host opens it on Enter but never descends into it when
+  copying, comparing or deleting -- and when deleting it passes `isDirectory = false`, so you remove
+  the link itself. `attributes` may carry Win32 `FILE_ATTRIBUTE_*` bits; HIDDEN/SYSTEM entries hide
+  until the user presses Ctrl+H.
+- **Writes never destroy.** Until `FinishWrite` succeeds an existing file at that path must stay
+  untouched, and after `AbortWrite` nothing partial may remain. `Rename` must refuse an existing
+  target.
+- **Errors** are a status (`kMcFsNotFound` matters: `Stat` uses it for "free", and the host's
+  conflict check relies on it) plus a short message written into the `error` buffer -- never a
+  password or other secret.
+- **Long waits** (network) poll `host->PollCancel()` and return `kMcFsCancelled`.
+  `kMcFsConnectionLost` makes the host offer Retry, which calls your optional `Reconnect` first.
+- **Optional extras:** `HasPendingChanges`/`Commit` (both or neither) give you the host's
+  Save / Don't save / Cancel prompt when the panel leaves, and when the user quits;
+  `confirmOnLeave` asks "Leave ...?" even with nothing to save; `Reload` runs on Ctrl+R;
+  `SetAttributes` (with `kMcFsCapAttributes`) serves Ctrl+A; `DownloadToFile`/`UploadFromFile`
+  (both or neither) move a whole file in one call -- preferred whenever the other side is the local
+  disk, with the host's progress callback (return value false = the user cancelled).
+- **Your own commands** find their open provider with `host->GetPanelProvider(side)` (your
+  `context`, or NULL) and `host->GetPanelProviderPath(side, ...)` (the current folder in it).
+  `host->IsPanelInProvider(side)` tells whether *any* provider is shown there -- a command working on
+  local files should refuse then, since `GetPanelPath` keeps answering with the local folder hidden
+  underneath.
+- **Threads.** The host calls a provider only from its main thread, never from background jobs
+  (Alt+F5 etc. refuse provider panels for that reason).
+
+`Source/PluginCommon/RemotePanel.cpp` (FTP/SFTP, with whole-file transfers and a listing cache) and
+the "Phase 3 / EXT-002" half of `Source/ZipPlugin/ZipPlugin.cpp` (an in-memory archive with
+`Commit`) are complete providers to copy from.
+
 ### Panel content
+
+For anything that isn't files and folders -- a custom view, a dashboard, a game -- use panel
+content: you draw the panel and handle its keys yourself.
 
 Declare `kMcPluginCapPanel` and export all three: `McPlugin_OnPanelDraw`, `McPlugin_OnPanelKey`,
 `McPlugin_OnPanelClick`. Then, from anywhere you already have `host` (typically `Init`, or a menu
@@ -497,19 +580,18 @@ bool __stdcall McPlugin_OnReceiveFiles(McPanelSide side, McPanelSide sourceSide)
 }
 ```
 
-See `Source/ZipPlugin/ZipPlugin.cpp`'s own `McPlugin_OnReceiveFiles` for a complete example (it
-reuses the exact same "add a panel's selection into the archive" logic its own Shift+Insert
-shortcut already uses). There is no equivalent interception point for F6 Move today — Move into
-panel content is left to the host's own ordinary fallback behavior.
+There is no equivalent interception point for F6 Move -- Move into panel content is left to the
+host's own ordinary fallback behavior. If you need F5 *and* F6 into what you show, that's the sign
+it should be a file-system provider instead (above), which gets both, and copies between any two
+panels, for free.
 
 **`Ctrl+R` is this project's own conventional "Refresh" key** (IS-0012) — for a normal panel, the
 host re-reads its directory from disk. It carries no special routing of its own: while your
 content is installed and active, it reaches your `OnPanelKey` exactly like any other key (per the
 "every key except Tab/F1/F10" rule above). If your content is backed by something that can go
 stale — data read from a file, e.g. — consider handling `Ctrl+R` yourself to reload it, the same
-way `Source/ZipPlugin/ZipPlugin.cpp`'s own archive browser re-reads its `.zip` from disk on this
-key. Nothing requires you to; a plugin that doesn't handle it just does nothing on `Ctrl+R`, same
-as any other key it doesn't recognize.
+way a provider's `Reload` (above) re-reads its source. Nothing requires you to; a plugin that
+doesn't handle it just does nothing on `Ctrl+R`, same as any other key it doesn't recognize.
 
 ### Animated progress (API 1.6)
 
@@ -556,6 +638,29 @@ for (uint64_t i = 0; i < count; ++i) {
 and reports whether Esc was among it — it doesn't block waiting for a keypress. Check it
 every item, not just when a conflict dialog happens to pop up, since Esc should interrupt
 the operation at any point, not only while a nested dialog is already open.
+
+### Letting the user pause (API 1.11, `WaitWhilePaused`)
+
+The user can pause a running operation with `P` (or `Pause/Break`) and resume it the same way. `PollCancel`
+never blocks, so it can't carry a pause: a plugin that supports pausing calls `host->WaitWhilePaused()` at
+**safe points** — between items, or between transfer chunks when no network wait is in progress — and never
+inside a bounded wait or while holding anything that times out:
+
+```cpp
+for (uint64_t i = 0; i < count; ++i) {
+    if (host->PollCancel()) break;
+    if (host->WaitWhilePaused && !host->WaitWhilePaused()) break;  // false = the user cancelled while paused
+    host->UpdateProgress(i, count, names[i]);
+    // Process this item.
+}
+```
+
+`WaitWhilePaused` returns at once when the operation isn't paused. While it waits, the host's progress box reads
+"[paused]". It returns `false` if the user pressed Esc meanwhile; **the host has consumed that Esc**, so remember the
+answer (the ZIP and remote-panel code keep a per-operation flag that their cancel check also reads) rather than
+relying on the next `PollCancel`. A plugin built against API 1.10 or older never calls it and is simply never
+paused: the host ignores `P` while it works. After a long pause a remote session may have been dropped by the
+server; the next transfer then reports a lost connection and the usual reconnect prompt applies.
 
 ### Inter-plugin services
 

@@ -1,7 +1,11 @@
+#include "CheckSum.h"
+#include "Clipboard.h"
+#include "FolderSize.h"
 #include "CommandHistory.h"
 #include "Config.h"
 #include "Console.h"
 #include "ContentSearch.h"
+#include "DiskUsage.h"
 #include "Dialog.h"
 #include "DiffViewer.h"
 #include "DirCompare.h"
@@ -13,17 +17,37 @@
 #include "FileActions.h"
 #include "FileInfo.h"
 #include "FileOps.h"
+#include "FolderWatch.h"
+#include "EmptyFolders.h"
+#include "Labels.h"
+#include "PauseToken.h"
+#include "RecentLocations.h"
 #include "Help.h"
 #include "JobWorker.h"
 #include "HintBar.h"
+#include "LocalProvider.h"
+#include "MemoryProvider.h"
+#include "ProviderCopy.h"
 #include "Log.h"
 #include "MenuBar.h"
+#include "NetDrives.h"
+#include "NetShares.h"
 #include "Navigation.h"
 #include "Panel.h"
 #include "PathUtil.h"
 #include "PluginManager.h"
 #include "Process.h"
 #include "Search.h"
+#include "Clipboard.h"
+#include "ClipboardPaste.h"
+#include "RecycleBin.h"
+#include "HistorySearch.h"
+#include "ExplorerReveal.h"
+#include "ListingExport.h"
+#include "PathCompletion.h"
+#include "Shortcut.h"
+#include "SecureDelete.h"
+#include "UndoJournal.h"
 #include "Session.h"
 #include "Strings.h"
 #include "TextDiff.h"
@@ -37,6 +61,7 @@
 #include <windows.h>
 #include <objbase.h>
 #include <shellapi.h>
+#include <shlobj.h>
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
@@ -248,6 +273,10 @@ std::wstring FormatModifiedTime(uint64_t filetimeRaw) {
     return buf;
 }
 
+// FOP-022: a one-line note the application itself wants on the status line
+// (e.g. "Undo list cleared"); dropped at the next key press.
+std::wstring gTransientNote;
+
 std::wstring BuildStatusLine(const Panel& panel) {
     int count = panel.SelectedCount();
     if (count > 0) {
@@ -256,7 +285,8 @@ std::wstring BuildStatusLine(const Panel& panel) {
                    static_cast<unsigned long long>(panel.SelectedSizeBytes()));
         return buf;
     }
-    return panel.StatusMessage();
+    if (!panel.StatusMessage().empty()) return panel.StatusMessage();
+    return gTransientNote;
 }
 
 std::filesystem::path ResolveStartPath(const std::filesystem::path& p) {
@@ -315,7 +345,7 @@ void InsertActiveReference(const Panel& panel, bool fullPath, std::wstring& comm
     if (!commandLine.empty() && commandLine.back() != L' ') commandLine += L' ';
     for (size_t i = 0; i < names.size(); ++i) {
         if (i) commandLine += L' ';
-        std::wstring value = fullPath ? (panel.Path() / names[i]).wstring() : names[i];
+        std::wstring value = fullPath ? panel.ItemLocation(names[i]) : names[i];
         if (value.find(L' ') != std::wstring::npos) {
             commandLine += L'"' + value + L'"';
         } else {
@@ -328,7 +358,21 @@ void InsertActiveReference(const Panel& panel, bool fullPath, std::wstring& comm
 // ResolveExistingDirectory), navigates the active panel there and returns
 // true. Returns false for anything else, so the caller falls back to
 // running the text as a shell command exactly as before.
+bool TryOpenDebugMemoryProvider(Panel& target, const std::wstring& text);
+
 bool TryNavigateToTypedPath(Panel& target, const std::wstring& text) {
+    if (TryOpenDebugMemoryProvider(target, text)) return true;
+    // EXT-002: inside a provider, an absolute provider path ("/a/b") moves
+    // within it; anything else is a local path and leaves the provider.
+    if (target.InProvider() && !text.empty() && text[0] == L'/') {
+        mc::ProviderEntry e;
+        std::wstring err;
+        if (target.Provider()->Stat(text, e, {}, err) == mc::ProviderStatus::Ok && e.isDirectory) {
+            target.NavigateProvider(text);
+            return true;
+        }
+        return false;
+    }
     auto resolved = ResolveExistingDirectory(target.Path(), text);
     if (!resolved) return false;
     target.NavigateTo(*resolved);
@@ -351,6 +395,9 @@ std::wstring SortIndicator(SortKey key, bool descending) {
             break;
         case SortKey::ModifiedTime:
             label = kStrSortDate;
+            break;
+        case SortKey::Attributes:
+            label = kStrSortAttributes;  // LIST-011
             break;
     }
     return label + (descending ? L"\x2193" : L"\x2191");  // down/up arrow
@@ -382,6 +429,11 @@ std::wstring FormatPanelSize(uint64_t bytes) {
 // UI-003: unlike the Alt+F1/F2 picker, this compact form is always visible
 // in each pane and tracks that pane's own current directory/volume.
 std::wstring FormatPanelVolumeLine(const Panel& panel) {
+    if (panel.InProvider()) {  // EXT-002: no volume behind a provider -- say what it is instead
+        std::wstring line = kStrProviderVolumePrefix + panel.Provider()->Kind() + L"]";
+        if (!(panel.Provider()->Capabilities() & mc::CapWrite)) line += L" " + std::wstring(kStrProviderReadOnly);
+        return line;
+    }
     const mc::VolumeInfo& volume = panel.Volume();
     if (!volume.available) return kStrVolumeInfoUnavailable;
 
@@ -426,6 +478,10 @@ int gSizeColumnWidth = 10;
 // way as the column settings above, so ComputeLineEditViewOffset can scroll
 // minimally rather than recentering on every frame.
 size_t gCommandLineViewOffset = 0;
+// CLI-008: while the reverse history search is open, the command row shows this prompt instead of the
+// folder prompt, and the status row this hint (both empty otherwise).
+std::wstring gCommandPromptOverride;
+std::wstring gStatusOverride;
 
 // UI-013 Part A: the single-panel layout (Ctrl+F1 / View > Single panel;
 // remembered in the Session file). A file-scope flag that DrawFrame and
@@ -531,6 +587,114 @@ std::vector<ColumnId> FitColumnsToWidth(const std::vector<ColumnId>& requested, 
     return cols;
 }
 
+// LIST-009: the colour labels (outside the files; see Labels.h). Module state
+// like gJobWorker: DrawPanel, the commands and the move/delete hooks share it
+// without a parameter on every signature. `gShowLabels` mirrors
+// Config::showLabels (refreshed every main-loop pass).
+mc::LabelStore gLabels;
+bool gShowLabels = true;
+
+// IS-0022 / LIST-013: folders that are the root of an ordinary share, marked with
+// ">" in the third cell of the row marker. Refreshed by RefreshSharedFolders (every
+// Config::shareRefreshSeconds, after Share/Unshare Folder, after a panel re-list).
+// `gShowShares` mirrors Config::showShares.
+mc::SharedFolderSet gSharedFolders;
+bool gShowShares = true;
+bool gSharedFoldersDirty = true;
+
+void RefreshSharedFolders() {
+    std::vector<mc::ShareInfo> all;
+    if (mc::EnumerateAllShares(all)) gSharedFolders = mc::SharedFolderSet(all);  // a failed call keeps the old set
+    gSharedFoldersDirty = false;
+}
+
+// ">" for a shared local folder, else a space. Never probes the disk.
+wchar_t SharedMarkOf(const Panel& panel, const Entry& entry) {
+    if (!gShowShares || gSharedFolders.Empty() || !entry.isDirectory || panel.InProvider() || entry.name == L"..")
+        return L' ';
+    return gSharedFolders.Contains(panel.Path() / entry.name) ? L'>' : L' ';
+}
+
+// LIST-010: folder sizes. The worker exists only while `folderSizes = on`; the
+// folders drawn this frame are collected by DrawPanel and handed over (and the
+// queue replaced) once per DrawFrame.
+bool gFolderSizesOn = false;
+std::unique_ptr<mc::FolderSizeWorker> gFolderSizes;
+std::vector<std::pair<std::filesystem::path, uint64_t>> gFolderSizesWanted;
+
+// The label (0 = none) an entry of `panel` carries. Never probes the disk, and
+// is skipped altogether for the common unlabelled case and for provider panels
+// (their `Path()` is the local folder underneath, not the shown location).
+int LabelOf(const Panel& panel, const Entry& entry) {
+    if (!gShowLabels || gLabels.Empty() || panel.InProvider() || entry.name == L"..") return 0;
+    return gLabels.Get(panel.Path() / entry.name);
+}
+
+// Saves the label file; false (logged by callers that can) when it can't be written.
+bool PersistLabels() { return mc::SaveLabelsTo(mc::LabelsFilePath(), gLabels.Entries()); }
+
+// A move or delete the application performed on `names` in `sourceDir`: a label
+// follows an item that now exists under `destDir` and is dropped for one that
+// was deleted. Probes the disk only for items that actually carry a label, and
+// never for one still present at its source (skipped or failed items).
+void LabelsAfterMoveOrDelete(const std::filesystem::path& sourceDir, const std::vector<std::wstring>& names,
+                             const std::filesystem::path* destDir) {
+    if (gLabels.Empty()) return;
+    bool changed = false;
+    for (const auto& name : names) {
+        const std::filesystem::path from = sourceDir / name;
+        if (!gLabels.HasAnyUnder(from)) continue;
+        std::error_code ec;
+        if (std::filesystem::exists(from, ec)) continue;  // still there: not moved, not deleted
+        if (destDir && std::filesystem::exists(*destDir / name, ec)) {
+            changed = gLabels.Move(from, *destDir / name) > 0 || changed;
+        } else {
+            changed = gLabels.RemoveUnder(from) > 0 || changed;
+        }
+    }
+    if (changed) PersistLabels();
+}
+
+// A rename the application performed: the label (and any beneath a folder) goes along.
+void LabelsAfterRename(const std::filesystem::path& from, const std::filesystem::path& to) {
+    if (gLabels.Move(from, to) > 0) PersistLabels();
+}
+
+// Same, for a rename whose success is only known from the disk (a batch): moves the
+// label when `to` exists and `from` is gone (or is the same file under another case).
+void LabelsAfterRenameIfDone(const std::filesystem::path& from, const std::filesystem::path& to) {
+    if (!gLabels.HasAnyUnder(from)) return;
+    std::error_code ec;
+    if (!std::filesystem::exists(to, ec)) return;
+    if (mc::LabelPathKey(from) == mc::LabelPathKey(to) || !std::filesystem::exists(from, ec)) LabelsAfterRename(from, to);
+}
+
+// FOP-022: the session-only undo journal (never persisted, ERR-006). An
+// operation that can't be reversed clears it, so Ctrl+Z never undoes
+// something older than what the user just did.
+mc::UndoJournal gUndo;
+
+void UndoRecord(mc::UndoKind kind, std::wstring description, std::vector<mc::UndoItem> items,
+                uint64_t startedUtc = 0) {
+    if (items.empty()) return;
+    mc::UndoEntry entry;
+    entry.kind = kind;
+    entry.startedUtc = startedUtc;
+    entry.description = std::move(description);
+    entry.items = std::move(items);
+    gUndo.Push(std::move(entry));
+}
+
+void UndoClear() {
+    if (gUndo.Empty()) return;
+    gUndo.Clear();
+    gTransientNote = kStrUndoCleared;
+}
+
+std::wstring UndoCountText(size_t count, const wchar_t* noun) {
+    return std::to_wstring(count) + L" " + noun + (count == 1 ? L"" : L"s");
+}
+
 void DrawPanel(Console& console, const Panel& panel, bool active, SHORT x, SHORT y, SHORT width, SHORT height) {
     // FEA-0002 Phase 3, Â§8: a panel with installed plugin content shows that
     // plugin's own `title` in place of the real path (the path/history
@@ -544,7 +708,7 @@ void DrawPanel(Console& console, const Panel& panel, bool active, SHORT x, SHORT
         return;
     }
 
-    std::wstring pathLine = panel.Path().wstring();
+    std::wstring pathLine = panel.LocationText();
     if (!panel.Filter().empty()) pathLine += L"  [" + panel.Filter() + L"]";
     if (panel.ShowingHiddenAndSystem()) pathLine += kStrHiddenAndSystemTag;
     if (panel.IsLoading()) pathLine += kStrLoadingTag;
@@ -568,6 +732,60 @@ void DrawPanel(Console& console, const Panel& panel, bool active, SHORT x, SHORT
     }
 
     const auto& entries = panel.Entries();
+
+    // UI-017: Brief view -- names only, several columns, column-major
+    // (BriefLayout/BriefEntryAt/BriefFirstVisible in Navigation.h own the
+    // pure geometry; this just draws it, one PutText per cell since each
+    // cell can carry its own selected/directory/cursor attribute, unlike
+    // Full view's one-call-per-row).
+    if (panel.BriefView()) {
+        SHORT longestName = 0;
+        for (const auto& e : entries)
+            longestName = std::max(longestName, static_cast<SHORT>(mc::StringDisplayWidth(e.name)));
+        mc::BriefLayout briefLayout = mc::ComputeBriefLayout(visibleRows, width, longestName);
+        int firstVisible = mc::BriefFirstVisible(panel.Cursor(), briefLayout.columns, visibleRows);
+        for (int row = 0; row < visibleRows; ++row) {
+            SHORT rowY = static_cast<SHORT>(y + 2 + row);
+            for (int col = 0; col < briefLayout.columns; ++col) {
+                SHORT cellX = static_cast<SHORT>(x + col * briefLayout.columnWidth);
+                if (cellX >= static_cast<SHORT>(x + width)) break;
+                SHORT cellWidth = static_cast<SHORT>(std::min<int>(briefLayout.columnWidth, x + width - cellX));
+                int index = mc::BriefEntryAt(firstVisible, visibleRows, col, row);
+                if (index < 0 || index >= static_cast<int>(entries.size())) {
+                    console.PutText(cellX, rowY, std::wstring(static_cast<size_t>(cellWidth), L' '), kAttrNormal);
+                    continue;
+                }
+                const auto& entry = entries[static_cast<size_t>(index)];
+                bool isCursorRow = (index == panel.Cursor());
+                WORD attr = kAttrNormal;
+                if (entry.isDirectory) attr = kAttrDir;
+                if (entry.selected) attr = kAttrSelected;
+                if (entry.inaccessible) attr = kAttrBroken;
+                if (isCursorRow) {
+                    attr = entry.inaccessible
+                             ? kAttrBrokenBanner
+                             : static_cast<WORD>((attr & kColorMask) | FOREGROUND_INTENSITY |
+                                                 (active ? BACKGROUND_BLUE : 0));
+                }
+                // LIST-009: the label's number sits in the second cell of the 2-cell
+                // marker prefix, so no column moves; its colour (and the name's) shows on
+                // rows that aren't the cursor, selected or broken.
+                const int label = LabelOf(panel, entry);
+                std::wstring prefix = std::wstring(entry.selected ? L"*" : L" ") +
+                                      (label > 0 ? static_cast<wchar_t>(L'0' + label) : L' ');
+                if (gShowShares) prefix += SharedMarkOf(panel, entry);  // IS-0022: third marker cell
+                std::wstring cellText = prefix + entry.name + (entry.isDirectory ? L"\\" : L"");
+                console.PutText(cellX, rowY, PadOrTrim(cellText, static_cast<size_t>(cellWidth)), attr);
+                if (label > 0 && !isCursorRow && !entry.selected && !entry.inaccessible && cellWidth > 1) {
+                    console.PutText(static_cast<SHORT>(cellX + 1), rowY,
+                                    PadOrTrim(cellText.substr(1), static_cast<size_t>(cellWidth - 1)),
+                                    kAttrLabel[label - 1]);
+                }
+            }
+        }
+        return;
+    }
+
     for (int row = 0; row < visibleRows; ++row) {
         SHORT rowY = static_cast<SHORT>(y + 2 + row);
         int index = panel.TopIndex() + row;
@@ -605,13 +823,33 @@ void DrawPanel(Console& console, const Panel& panel, bool active, SHORT x, SHORT
         // entry identifiable from the text alone, e.g. under a monochrome or
         // color-filtered terminal. "  " for an unselected entry keeps every
         // row's name column starting at the same offset.
-        constexpr size_t kSelectionMarkerWidth = 2;
-        std::wstring selectionMarker = entry.selected ? L"* " : L"  ";
+        // IS-0022: a third cell holds ">" for a shared folder (only while showShares is on).
+        const size_t kSelectionMarkerWidth = gShowShares ? 3 : 2;
+        // LIST-009: a colour label's number takes the marker's second cell (never
+        // colour alone; no column moves).
+        const int label = LabelOf(panel, entry);
+        std::wstring selectionMarker = std::wstring(entry.selected ? L"*" : L" ") +
+                                       (label > 0 ? static_cast<wchar_t>(L'0' + label) : L' ');
+        if (gShowShares) selectionMarker += SharedMarkOf(panel, entry);
 
         std::wstring sizeCol = entry.inaccessible    ? RightAlignAscii(kStrSizeColBroken, ColumnDisplayWidth(ColumnId::Size))
                               : entry.isReparsePoint ? RightAlignAscii(kStrSizeColReparse, ColumnDisplayWidth(ColumnId::Size))
                               : entry.isDirectory    ? RightAlignAscii(kStrSizeColDir, ColumnDisplayWidth(ColumnId::Size))
                                                       : FormatSize(entry.sizeBytes, gSizeColumnWidth);
+        // LIST-010: a local folder's measured total ("..." while measuring, "?" if part
+        // of the tree could not be read). Only the rows drawn here are ever measured.
+        if (gFolderSizesOn && gFolderSizes && entry.isDirectory && !entry.isReparsePoint && !entry.inaccessible &&
+            entry.name != L".." && !panel.InProvider()) {
+            const std::filesystem::path folder = panel.Path() / entry.name;
+            gFolderSizesWanted.push_back({folder, entry.lastWriteTimeUtc});
+            mc::FolderSizeLookup fl = gFolderSizes->Lookup(folder, entry.lastWriteTimeUtc);
+            if (fl.hasValue) {
+                sizeCol = fl.unreadable > 0 ? FormatSize(fl.bytes, gSizeColumnWidth - 1) + L"?"
+                                            : FormatSize(fl.bytes, gSizeColumnWidth);
+            } else {
+                sizeCol = RightAlignAscii(L"...", ColumnDisplayWidth(ColumnId::Size));
+            }
+        }
 
         // UI-004/UI-005: a row can show name plus any configured subset of
         // type/attributes/modification-time/size, but a narrow terminal
@@ -643,6 +881,14 @@ void DrawPanel(Console& console, const Panel& panel, bool active, SHORT x, SHORT
             }
         }
         console.PutText(x, rowY, PadOrTrim(line, width), attr);
+        // LIST-009: the label's colour on the number cell and the name, on rows that keep
+        // their own style (cursor, selection and broken entries are never recoloured).
+        if (label > 0 && !isCursorRow && !entry.selected && !entry.inaccessible) {
+            console.PutText(static_cast<SHORT>(x + 1), rowY, std::wstring(1, static_cast<wchar_t>(L'0' + label)),
+                            kAttrLabel[label - 1]);
+            console.PutText(static_cast<SHORT>(x + kSelectionMarkerWidth), rowY, PadOrTrim(entry.name, nameWidth),
+                            kAttrLabel[label - 1]);
+        }
     }
 }
 
@@ -882,7 +1128,7 @@ void DrawFrame(Console& console, const Panel& left, const Panel& right, bool lef
     // obvious, so it's skipped entirely rather than drawn empty).
     HintContext hintContext = GetHintContext(active, commandLine);
     SHORT hintRows = static_cast<SHORT>(HintBarRowCount(hintContext, width));
-    std::wstring status = BuildStatusLine(active);
+    std::wstring status = gStatusOverride.empty() ? BuildStatusLine(active) : gStatusOverride;
     bool hasStatusLine = !status.empty();
     SHORT reservedRows = static_cast<SHORT>(1 + (hasStatusLine ? 1 : 0) + hintRows);
     // FEA-0005: the frame's own drawable height now also excludes the menu
@@ -932,13 +1178,13 @@ void DrawFrame(Console& console, const Panel& left, const Panel& right, bool lef
         // UI-013 Part A: name the hidden panel on the bottom border, so F5/F6
         // and compare "to the other panel" stay understandable.
         const Panel& hidden = leftActive ? right : left;
-        std::wstring where = hidden.Content() ? hidden.ContentTitle() : hidden.Path().wstring();
+        std::wstring where = hidden.Content() ? hidden.ContentTitle() : hidden.LocationText();
         std::wstring label = mc::FormatOtherPanelLabel(where, static_cast<int>(width) - 4);
         if (!label.empty())
             console.PutText(static_cast<SHORT>(width - 2 - StringDisplayWidth(label)), bottom, label, kAttrNormal);
     }
 
-    std::wstring cmdPrefix = active.Path().wstring() + L"> ";
+    std::wstring cmdPrefix = gCommandPromptOverride.empty() ? active.LocationText() + L"> " : gCommandPromptOverride;
     // IS-0016: a deep path prompt may take at most half the row, shown as
     // "..." plus its tail, so the editable part always keeps room to scroll.
     const int maxPrefixWidth = std::max(4, static_cast<int>(width) / 2);
@@ -984,6 +1230,9 @@ void DrawFrame(Console& console, const Panel& left, const Panel& right, bool lef
         console.PutText(placed.col, static_cast<SHORT>(hintBarTopRow + placed.row), placed.segment.label,
                         kAttrStatusBar);
     }
+    // LIST-010: hand over the folders this frame showed; leaving a folder drops its queue.
+    if (gFolderSizes) gFolderSizes->Want(gFolderSizesWanted);
+    gFolderSizesWanted.clear();
 }
 
 // UI-006: below this, the two-panel layout's column math (leftWidth/2,
@@ -1036,10 +1285,56 @@ int ComputeVisibleRows(Console& console, HintContext hintContext, bool hasStatus
 // Drains all pending input, applying any resize seen along the way, and
 // reports whether Esc was among the drained keys. Used to let a long copy
 // or move be cancelled without blocking on ReadConsoleInputW. The actual
-// drain logic lives in Console.cpp's mc::PollAndConsumeEscape, shared with
+// drain logic lives in Console.cpp's mc::PollProgressKeys, shared with
 // PluginManager's own PollCancel host function (IS-0010).
+//
+// FOP-015: P / Pause toggles a pause. While paused this call itself waits (the
+// engines' cancel poll is the one safe point every long operation already has),
+// keeps polling keys, and returns true only for Esc. gForegroundPauseEpoch
+// counts finished pauses so a progress box can restart its speed sampling.
+mc::PauseToken gForegroundPause;
+unsigned gForegroundPauseEpoch = 0;
+
 bool PeekEscapePressed(Console& console) {
-    return mc::PollAndConsumeEscape(console);
+    mc::ProgressKeys keys = mc::PollProgressKeys(console);
+    if (keys.cancel) {
+        gForegroundPause.Resume();
+        return true;
+    }
+    if (keys.togglePause) gForegroundPause.Toggle();
+    if (!gForegroundPause.Paused()) return false;
+
+    // Show the paused state: in the animated box when there is one, else on the
+    // bottom row (the header-line scans -- find, compare, hashing -- have no box).
+    mc::AnimatedProgressDialog* box = mc::AnimatedProgressDialog::Current();
+    const SHORT lastRow = static_cast<SHORT>(console.Height() - 1);
+    if (box) {
+        box->SetUserPaused(true);
+    } else {
+        console.PutText(0, lastRow, PadOrTrim(kStrPausedHint, console.Width()), kAttrHeaderActive);
+        console.Present();
+    }
+    bool cancelled = false;
+    gForegroundPause.WaitWhilePaused(
+        [&]() {
+            mc::ProgressKeys more = mc::PollProgressKeys(console);
+            if (more.cancel) {
+                cancelled = true;
+                return true;
+            }
+            if (more.togglePause) gForegroundPause.Resume();
+            return false;
+        },
+        [&]() { Sleep(0); });
+    gForegroundPause.Resume();
+    if (box) {
+        box->SetUserPaused(false);
+    } else {
+        console.PutText(0, lastRow, std::wstring(console.Width(), L' '), kAttrNormal);
+        console.Present();
+    }
+    ++gForegroundPauseEpoch;
+    return cancelled;
 }
 
 // Bundles the per-operation progress dialog and cancel polling so
@@ -1123,7 +1418,17 @@ struct ProgressUi {
         Draw();
     }
 
-    bool PollCancel() { return PeekEscapePressed(console); }
+    bool PollCancel() {
+        const bool cancelled = PeekEscapePressed(console);
+        // FOP-015: don't let the time spent paused decay the displayed speed.
+        if (seenPauseEpoch != gForegroundPauseEpoch) {
+            seenPauseEpoch = gForegroundPauseEpoch;
+            lastSampleTime = std::chrono::steady_clock::now();
+        }
+        return cancelled;
+    }
+
+    unsigned seenPauseEpoch = gForegroundPauseEpoch;  // public: ProgressUi is brace-initialized
 
 private:
     void Draw() {
@@ -1264,6 +1569,77 @@ void ReportOutcome(Console& console, const Panel& left, const Panel& right, bool
     ShowMessage(console, FormatOperationResultTitle(verb), lines, redraw);
 }
 
+// --- EXT-002: file-system providers ------------------------------------------
+
+mc::LocalProvider gLocalProvider;
+
+mc::IFileProvider& ProviderOf(const Panel& panel) {
+    if (panel.InProvider()) return *panel.Provider();
+    return gLocalProvider;
+}
+
+std::wstring LocationOf(const Panel& panel) {
+    return panel.InProvider() ? panel.ProviderPath() : panel.Path().wstring();
+}
+
+// Local-only features (they need real Windows paths) refuse inside a
+// provider with one shared message, rather than acting on the local folder
+// hidden underneath.
+bool RefuseInsideProvider(Console& console, const Panel& left, const Panel& right, bool leftActive, const Panel& panel,
+                          const std::wstring& title, const wchar_t* hint = kStrProviderNotHereHint) {
+    if (!panel.InProvider()) return false;
+    auto redraw = [&]() { DrawFrame(console, left, right, leftActive); };
+    ShowMessage(console, title, {FormatNotInsideProvider(panel.LocationText()), hint}, redraw);
+    return true;
+}
+
+bool RefuseWithoutCapability(Console& console, const Panel& left, const Panel& right, bool leftActive,
+                             const Panel& panel, uint32_t capability, const std::wstring& title) {
+    if (!panel.InProvider() || (panel.Provider()->Capabilities() & capability)) return false;
+    auto redraw = [&]() { DrawFrame(console, left, right, leftActive); };
+    ShowMessage(console, title, {panel.LocationText(), kStrProviderCannotWrite}, redraw);
+    return true;
+}
+
+bool IsPlainName(const std::wstring& name) {
+    return !name.empty() && name.find_first_of(L"\\/") == std::wstring::npos && name != L"." && name != L"..";
+}
+
+mc::ProviderOpHandlers MakeProviderHandlers(Console& console, const Panel& left, const Panel& right, bool leftActive,
+                                            ProgressUi& ui, Logger& logger) {
+    mc::ProviderOpHandlers h;
+    h.onConflict = [&](const std::filesystem::path& d) { return AskConflict(console, left, right, leftActive, d); };
+    h.onItemStart = [&](const std::wstring& n, int done, int total) { return ui.OnItemStart(n, done, total); };
+    h.cancelPoll = [&]() { return ui.PollCancel(); };
+    h.onError = [&](const std::wstring& n, const std::wstring& msg, DWORD) {
+        return AskFileError(console, left, right, leftActive, n, msg, 0);  // never offers elevation
+    };
+    h.onByteProgress = [&](uint64_t transferred, uint64_t total) { ui.OnByteProgress(transferred, total); };
+    h.onNote = [&](const std::wstring& note) { logger.Log(LogLevel::Info, note); };
+    return h;
+}
+
+// Refreshes `other` when it shows the same location as `target` (same
+// provider object and path, or the same local folder).
+// NAV-016: Ctrl+U / Commands > Swap panels. The side that has focus keeps it;
+// the listings move. Plugin content and providers are tied to a side, so the
+// swap is refused (with the reason) while either panel shows one.
+void DoSwapPanels(Console& console, Panel& left, Panel& right, bool leftActive) {
+    if (!left.SwapListingWith(right)) {
+        auto redraw = [&]() { DrawFrame(console, left, right, leftActive); };
+        ShowMessage(console, kStrSwapPanelsTitle, {kStrSwapPanelsRefused, kStrSwapPanelsRefusedHint}, redraw);
+    }
+}
+
+void SyncOtherPanelIfSamePath(const Panel& target, Panel& other) {
+    if (target.InProvider() || other.InProvider()) {
+        if (target.Provider() == other.Provider() && target.Provider()->SamePath(target.ProviderPath(), other.ProviderPath()))
+            other.Refresh();
+        return;
+    }
+    if (PathsEquivalent(target.Path(), other.Path())) other.Refresh();
+}
+
 // SRC-003: filters the active panel's own listing by name/wildcard. An
 // empty submission (just pressing Enter on the pre-filled prompt) clears it.
 void DoFilter(Console& console, Panel& left, Panel& right, bool leftActive) {
@@ -1297,7 +1673,15 @@ void DoSelectByMask(Console& console, Panel& left, Panel& right, bool leftActive
 // picker. Enter jumps the active panel straight to the chosen entry
 // ("navigable ... in a panel"); F3 opens a file result directly in the
 // built-in viewer ("openable ... in a viewer") without leaving the picker.
-void DoSearch(Console& console, Panel& left, Panel& right, bool leftActive) {
+std::optional<std::filesystem::path> FetchProviderFile(Console& console, const Panel& left, const Panel& right,
+                                                       bool leftActive, mc::IFileProvider& provider,
+                                                       const std::wstring& dir, const std::wstring& name,
+                                                       Logger& logger);
+std::optional<std::filesystem::path> ComparedFile(Console& console, const Panel& left, const Panel& right,
+                                                  bool leftActive, const Panel& panel,
+                                                  const std::wstring& relativePath, Logger& logger);
+
+void DoSearch(Console& console, Panel& left, Panel& right, bool leftActive, Logger& logger) {
     Panel& target = leftActive ? left : right;
     auto redraw = [&]() { DrawFrame(console, left, right, leftActive); };
 
@@ -1347,6 +1731,11 @@ void DoSearch(Console& console, Panel& left, Panel& right, bool leftActive) {
         if (options.nameMask.empty()) return;
         options.encoding = static_cast<mc::TextEncodingChoice>(state.encoding);
         options.skipBinary = state.skipBinary;
+        if (!state.text.empty() && target.InProvider()) {
+            // EXT-002: inside an archive or on a server, names only.
+            ShowMessage(console, kStrFindFilesTitle, {kStrProviderNoContentSearch}, redraw);
+            continue;
+        }
         if (!state.text.empty()) {
             std::wstring error;
             options.content = mc::ContentMatcher::Create({state.text, state.regex, state.matchCase}, error);
@@ -1361,7 +1750,7 @@ void DoSearch(Console& console, Panel& left, Panel& right, bool leftActive) {
     const std::wstring shownTerm = contentSearch ? state.text : options.nameMask;
 
     console.Clear(kAttrNormal);
-    console.PutText(0, 0, PadOrTrim(FormatSearchingHeader(target.Path().wstring(), shownTerm), console.Width()),
+    console.PutText(0, 0, PadOrTrim(FormatSearchingHeader(target.LocationText(), shownTerm), console.Width()),
                     kAttrHeaderActive);
     console.Present();
 
@@ -1373,12 +1762,14 @@ void DoSearch(Console& console, Panel& left, Panel& right, bool leftActive) {
         if (now - lastProgress < std::chrono::milliseconds(100)) return;
         lastProgress = now;
         console.PutText(0, 0,
-                        PadOrTrim(FormatContentSearchProgress(target.Path().wstring(), shownTerm, files, current.wstring()),
+                        PadOrTrim(FormatContentSearchProgress(target.LocationText(), shownTerm, files, current.wstring()),
                                   console.Width()),
                         kAttrHeaderActive);
         console.Present();
     };
-    SearchOutcome outcome = SearchFiles(target.Path(), options, cancelPoll, onProgress);
+    SearchOutcome outcome =
+        target.InProvider() ? mc::SearchProvider(*target.Provider(), target.ProviderPath(), options, cancelPoll, onProgress)
+                            : SearchFiles(target.Path(), options, cancelPoll, onProgress);
 
     if (outcome.results.empty()) {
         std::wstring why = outcome.cancelled ? kStrSearchCancelled : (contentSearch ? kStrNoFilesContain : kStrNoMatchesFound);
@@ -1419,7 +1810,9 @@ void DoSearch(Console& console, Panel& left, Panel& right, bool leftActive) {
             // file result by kAttrDir's color alone â€” a trailing "\" (the
             // ordinary Windows convention for a directory path) makes that
             // status readable from the text itself.
-            std::wstring resultLine = r.fullPath.wstring() + (r.isDirectory ? L"\\" : L"");
+            std::wstring resultLine = target.InProvider()
+                                          ? target.Provider()->DisplayRoot() + r.fullPath.wstring() + (r.isDirectory ? L"/" : L"")
+                                          : r.fullPath.wstring() + (r.isDirectory ? L"\\" : L"");
             if (r.lineNumber > 0) {
                 // SRC-004: "path  :12:  matching line" (leading whitespace trimmed, tabs as spaces).
                 std::wstring text = r.lineText;
@@ -1471,14 +1864,196 @@ void DoSearch(Console& console, Panel& left, Panel& right, bool leftActive) {
                     start.line = outcome.results[cursor].lineNumber;
                     if (contentSearch && !state.regex && !shownTerm.empty() && shownTerm[0] != L'#')
                         start.searchTerm = shownTerm;
+                    if (target.InProvider()) {  // EXT-002: a fetched copy
+                        mc::IFileProvider& provider = *target.Provider();
+                        const std::wstring path = outcome.results[cursor].fullPath.wstring();
+                        if (auto local = FetchProviderFile(console, left, right, leftActive, provider, provider.Parent(path),
+                                                           mc::ProviderLeafName(provider, path), logger))
+                            ShowTextFileViewer(console, *local, start);
+                        break;
+                    }
                     ShowTextFileViewer(console, outcome.results[cursor].fullPath, start);
                 }
                 break;
             case VK_RETURN: {
                 const SearchResult& r = outcome.results[cursor];
+                if (target.InProvider()) {  // EXT-002
+                    mc::IFileProvider& provider = *target.Provider();
+                    const std::wstring path = r.fullPath.wstring();
+                    target.NavigateProvider(r.isDirectory ? path : provider.Parent(path),
+                                            r.isDirectory ? L"" : mc::ProviderLeafName(provider, path));
+                    running = false;
+                    break;
+                }
                 std::filesystem::path dir = r.isDirectory ? r.fullPath : r.fullPath.parent_path();
                 std::wstring selectName = r.isDirectory ? L"" : r.fullPath.filename().wstring();
                 target.NavigateTo(dir, selectName);
+                running = false;
+                break;
+            }
+            case VK_ESCAPE:
+            case VK_F10:
+                running = false;
+                break;
+            default:
+                break;
+        }
+    }
+}
+
+// SRC-010: Commands > Largest files (Ctrl+F12). A form (count, minimum size,
+// name mask, subfolders, hidden), then a ranked, read-only list: Enter goes to a
+// file, F3 views it, Esc closes. The walk keeps only the N largest in memory.
+void DoLargestFiles(Console& console, Panel& left, Panel& right, bool leftActive) {
+    Panel& target = leftActive ? left : right;
+    auto redraw = [&]() { DrawFrame(console, left, right, leftActive); };
+    if (target.InProvider() || target.Content() != nullptr) {
+        ShowMessage(console, kStrLargestTitle, {kStrLargestLocalOnly}, redraw);
+        return;
+    }
+
+    // Remembered for the session only, like the Find form.
+    struct LargestState {
+        std::wstring count = L"100";
+        std::wstring minimum = L"0";
+        std::wstring mask = L"*";
+        bool subfolders = true;
+        bool hidden = false;
+    };
+    static LargestState state;
+
+    size_t requested = 0;
+    uint64_t minimum = 0;
+    std::vector<mc::FormField> fields(5);
+    while (true) {
+        fields[0].kind = mc::FormFieldKind::Text;
+        fields[0].label = kStrLargestCount;
+        fields[0].text = state.count;
+        fields[0].textCursor = state.count.size();
+        fields[1].kind = mc::FormFieldKind::Text;
+        fields[1].label = kStrLargestMinimum;
+        fields[1].text = state.minimum;
+        fields[1].textCursor = state.minimum.size();
+        fields[2].kind = mc::FormFieldKind::Text;
+        fields[2].label = kStrLargestMask;
+        fields[2].text = state.mask;
+        fields[2].textCursor = state.mask.size();
+        fields[3].kind = mc::FormFieldKind::Checkbox;
+        fields[3].label = kStrLargestSubfolders;
+        fields[3].boolValue = state.subfolders;
+        fields[4].kind = mc::FormFieldKind::Checkbox;
+        fields[4].label = kStrLargestHidden;
+        fields[4].boolValue = state.hidden;
+        if (!mc::ShowFormDialog(console, kStrLargestTitle, fields, redraw)) return;
+        state = {fields[0].text, fields[1].text, fields[2].text, fields[3].boolValue, fields[4].boolValue};
+        if (!mc::ParseLargestCount(state.count, requested)) {
+            ShowMessage(console, kStrLargestTitle, {kStrLargestBadCount}, redraw);
+            continue;
+        }
+        if (!mc::ParseMinimumSize(state.minimum, minimum)) {
+            ShowMessage(console, kStrLargestTitle, {kStrLargestBadMinimum}, redraw);
+            continue;
+        }
+        break;
+    }
+    if (state.mask.empty()) state.mask = L"*";
+
+    mc::SearchOptions options;
+    options.nameMask = state.mask;
+    options.largestCount = requested;
+    options.minSize = minimum;
+    options.recursive = state.subfolders;
+    options.includeHidden = state.hidden;
+
+    console.Clear(kAttrNormal);
+    console.PutText(0, 0, PadOrTrim(L"Looking for the largest files in " + target.LocationText(), console.Width()),
+                    kAttrHeaderActive);
+    console.Present();
+    auto cancelPoll = [&]() { return PeekEscapePressed(console); };
+    auto lastProgress = std::chrono::steady_clock::time_point{};
+    auto onProgress = [&](size_t files, const std::filesystem::path& current) {
+        auto now = std::chrono::steady_clock::now();
+        if (now - lastProgress < std::chrono::milliseconds(100)) return;
+        lastProgress = now;
+        console.PutText(0, 0,
+                        PadOrTrim(L"Examined " + std::to_wstring(files) + L" files: " + current.wstring(), console.Width()),
+                        kAttrHeaderActive);
+        console.Present();
+    };
+    mc::SearchOutcome outcome = mc::SearchFiles(target.Path(), options, cancelPoll, onProgress);
+
+    if (outcome.results.empty()) {
+        ShowMessage(console, kStrLargestTitle, {outcome.cancelled ? kStrSearchCancelled : kStrLargestNone}, redraw);
+        return;
+    }
+
+    int cursor = 0;
+    int topIndex = 0;
+    bool running = true;
+    while (running) {
+        int rows = std::max<int>(1, console.Height() - 2);
+        cursor = std::clamp(cursor, 0, static_cast<int>(outcome.results.size()) - 1);
+        if (cursor < topIndex) topIndex = cursor;
+        if (cursor >= topIndex + rows) topIndex = cursor - rows + 1;
+        topIndex = std::max(0, topIndex);
+
+        console.Clear(kAttrNormal);
+        console.PutText(0, 0,
+                        PadOrTrim(FormatLargestHeader(outcome.results.size(), requested, outcome.filesSearched,
+                                                      outcome.cancelled),
+                                  console.Width()),
+                        kAttrHeaderActive);
+        for (int row = 0; row < rows; ++row) {
+            int index = topIndex + row;
+            SHORT y = static_cast<SHORT>(1 + row);
+            if (index >= static_cast<int>(outcome.results.size())) {
+                console.PutText(0, y, std::wstring(console.Width(), L' '), kAttrNormal);
+                continue;
+            }
+            const mc::SearchResult& r = outcome.results[static_cast<size_t>(index)];
+            WORD attr = kAttrNormal;
+            if (index == cursor) attr = static_cast<WORD>((attr & kColorMask) | FOREGROUND_INTENSITY | BACKGROUND_BLUE);
+            std::wstring line = FormatSize(r.sizeBytes, 12) + L"  " + r.fullPath.wstring();
+            console.PutText(0, y, PadOrTrim(line, console.Width()), attr);
+        }
+        console.PutText(0, static_cast<SHORT>(console.Height() - 1), PadOrTrim(kStrLargestHint, console.Width()),
+                        kAttrStatusBar);
+        console.Present();
+
+        INPUT_RECORD record;
+        DWORD read = 0;
+        if (!ReadConsoleInputW(console.InputHandle(), &record, 1, &read) || read == 0) continue;
+        if (record.EventType == WINDOW_BUFFER_SIZE_EVENT) {
+            console.UpdateSize();
+            continue;
+        }
+        if (record.EventType != KEY_EVENT || !record.Event.KeyEvent.bKeyDown) continue;
+
+        switch (record.Event.KeyEvent.wVirtualKeyCode) {
+            case VK_UP:
+                --cursor;
+                break;
+            case VK_DOWN:
+                ++cursor;
+                break;
+            case VK_PRIOR:
+                cursor -= rows;
+                break;
+            case VK_NEXT:
+                cursor += rows;
+                break;
+            case VK_HOME:
+                cursor = 0;
+                break;
+            case VK_END:
+                cursor = static_cast<int>(outcome.results.size()) - 1;
+                break;
+            case VK_F3:
+                ShowTextFileViewer(console, outcome.results[static_cast<size_t>(cursor)].fullPath);
+                break;
+            case VK_RETURN: {
+                const std::filesystem::path file = outcome.results[static_cast<size_t>(cursor)].fullPath;
+                target.NavigateTo(file.parent_path(), file.filename().wstring());
                 running = false;
                 break;
             }
@@ -1535,13 +2110,23 @@ bool RefuseCompareOfPanels(Console& console, const Panel& left, const Panel& rig
         ShowMessage(console, title, {kStrCompareNeedsFolders}, redraw);
         return true;
     }
+    // EXT-002: a provider panel (an archive, a server) compares through it.
+    for (const Panel* p : {&left, &right}) {
+        if (p->InProvider() && !(p->Provider()->Capabilities() & mc::CapRead)) {
+            ShowMessage(console, title, {kStrCompareCannotList, p->LocationText()}, redraw);
+            return true;
+        }
+    }
     const Panel* const panels[] = {&left, &right};
     auto broken = std::find_if(std::begin(panels), std::end(panels), [](const Panel* p) { return p->LocationInaccessible(); });
     if (broken != std::end(panels)) {
-        ShowMessage(console, title, {kStrCompareCannotList, (*broken)->Path().wstring()}, redraw);
+        ShowMessage(console, title, {kStrCompareCannotList, (*broken)->LocationText()}, redraw);
         return true;
     }
-    if (mc::PathsEquivalent(left.Path(), right.Path())) {
+    bool sameFolder = (left.InProvider() || right.InProvider())
+                          ? left.Provider() == right.Provider() && left.Provider()->SamePath(left.ProviderPath(), right.ProviderPath())
+                          : mc::PathsEquivalent(left.Path(), right.Path());
+    if (sameFolder) {
         ShowMessage(console, title, {kStrCompareSameFolder}, redraw);
         return true;
     }
@@ -1683,12 +2268,15 @@ void ShowFileDifferences(Console& console, const std::filesystem::path& leftFile
 // selected in each panel, else the active file and the same name (or the
 // cursor file) in the other panel.
 void DoCompareFiles(Console& console, Panel& left, Panel& right, bool leftActive, const Config& config,
-                    bool forceBuiltin) {
+                    bool forceBuiltin, Logger& logger) {
     auto redraw = [&]() { DrawFrame(console, left, right, leftActive); };
     if (RefuseCompareOfPanels(console, left, right, leftActive, kStrDiffTitle)) return;
-    auto state = [](const Panel& panel) {
+    // EXT-002: a provider panel stands in with a placeholder folder; its
+    // chosen file is fetched into a temporary copy afterwards.
+    const std::filesystem::path leftMarker = L"\\\\?\\mc-provider-left", rightMarker = L"\\\\?\\mc-provider-right";
+    auto state = [&](const Panel& panel) {
         mc::ComparePanelState s;
-        s.folder = panel.Path();
+        s.folder = panel.InProvider() ? (&panel == &left ? leftMarker : rightMarker) : panel.Path();
         const auto& entries = panel.Entries();
         for (const auto& e : entries) {
             if (e.name == L"..") continue;
@@ -1709,7 +2297,27 @@ void DoCompareFiles(Console& console, Panel& left, Panel& right, bool leftActive
         ShowMessage(console, kStrDiffTitle, {files.problem}, redraw);
         return;
     }
-    ShowFileDifferences(console, files.pair->first, files.pair->second, config, forceBuiltin, redraw);
+    auto resolve = [&](const std::filesystem::path& chosen) -> std::optional<std::filesystem::path> {
+        const Panel* owner = chosen.parent_path() == leftMarker ? &left : chosen.parent_path() == rightMarker ? &right : nullptr;
+        if (!owner) return chosen;
+        return FetchProviderFile(console, left, right, leftActive, *owner->Provider(), owner->ProviderPath(),
+                                 chosen.filename().wstring(), logger);
+    };
+    auto leftFile = resolve(files.pair->first);
+    auto rightFile = leftFile ? resolve(files.pair->second) : std::nullopt;
+    if (leftFile && rightFile) ShowFileDifferences(console, *leftFile, *rightFile, config, forceBuiltin, redraw);
+}
+
+// EXT-002: a file named by a compare/sync result (relative to the panel's
+// location), as a local path to read: the file itself, or a fetched copy.
+std::optional<std::filesystem::path> ComparedFile(Console& console, const Panel& left, const Panel& right,
+                                                  bool leftActive, const Panel& panel,
+                                                  const std::wstring& relativePath, Logger& logger) {
+    if (!panel.InProvider()) return panel.Path() / relativePath;
+    mc::IFileProvider& provider = *panel.Provider();
+    std::filesystem::path rel(relativePath);
+    std::wstring dir = mc::JoinProviderRelative(provider, panel.ProviderPath(), rel.parent_path());
+    return FetchProviderFile(console, left, right, leftActive, provider, dir, rel.filename().wstring(), logger);
 }
 
 mc::CompareOutcome RunCompareWithProgress(Console& console, const Panel& left, const Panel& right,
@@ -1732,6 +2340,9 @@ mc::CompareOutcome RunCompareWithProgress(Console& console, const Panel& left, c
                         kAttrHeaderActive);
         console.Present();
     };
+    if (left.InProvider() || right.InProvider())  // EXT-002
+        return mc::CompareDirectories(ProviderOf(left), LocationOf(left), ProviderOf(right), LocationOf(right), options,
+                                      cancelPoll, onProgress);
     return mc::CompareDirectories(left.Path(), right.Path(), options, cancelPoll, onProgress);
 }
 
@@ -1749,7 +2360,7 @@ struct SyncPreset {
 // each differing pair), then optionally shows the full results list.
 // SRC-007: F5 in that list returns a preset for the sync form.
 std::optional<SyncPreset> DoCompareDirectories(Console& console, Panel& left, Panel& right, bool leftActive,
-                                               const Config& config) {
+                                               const Config& config, Logger& logger) {
     auto redraw = [&]() { DrawFrame(console, left, right, leftActive); };
     if (RefuseCompareOfPanels(console, left, right, leftActive, kStrCompareTitle)) return std::nullopt;
 
@@ -1800,7 +2411,7 @@ std::optional<SyncPreset> DoCompareDirectories(Console& console, Panel& left, Pa
 
     if (!outcome.leftListed || !outcome.rightListed) {
         ShowMessage(console, kStrCompareTitle,
-                    {kStrCompareCannotList, (outcome.leftListed ? right : left).Path().wstring()}, redraw);
+                    {kStrCompareCannotList, (outcome.leftListed ? right : left).LocationText()}, redraw);
         return std::nullopt;
     }
 
@@ -1860,7 +2471,7 @@ std::optional<SyncPreset> DoCompareDirectories(Console& console, Panel& left, Pa
     };
     rebuild();
 
-    const std::wstring header = left.Path().wstring() + L"  <->  " + right.Path().wstring() + L"  \x2014 " +
+    const std::wstring header = left.LocationText() + L"  <->  " + right.LocationText() + L"  \x2014 " +
                                 fields[0].choices[static_cast<size_t>(state.method)] + L" \x2014 " + summary;
     auto sideText = CompareSideText;
 
@@ -1936,14 +2547,20 @@ std::optional<SyncPreset> DoCompareDirectories(Console& console, Panel& left, Pa
                 const mc::CompareItem& item = outcome.items[shown[static_cast<size_t>(cursor)]];
                 if (record.Event.KeyEvent.dwControlKeyState & (LEFT_ALT_PRESSED | RIGHT_ALT_PRESSED)) {
                     // SRC-008: the differences of a pair present on both sides.
-                    if (item.left && item.right && !item.left->isDirectory && !item.right->isDirectory)
-                        ShowFileDifferences(console, left.Path() / item.relativePath, right.Path() / item.relativePath,
-                                            config, shift, [] {});
+                    if (item.left && item.right && !item.left->isDirectory && !item.right->isDirectory) {
+                        auto leftFile = ComparedFile(console, left, right, leftActive, left, item.relativePath, logger);
+                        auto rightFile = leftFile ? ComparedFile(console, left, right, leftActive, right, item.relativePath, logger)
+                                                  : std::nullopt;
+                        if (leftFile && rightFile) ShowFileDifferences(console, *leftFile, *rightFile, config, shift, [] {});
+                    }
                     break;
                 }
                 const auto& side = shift ? item.right : item.left;
-                if (side && !side->isDirectory)
-                    ShowTextFileViewer(console, (shift ? right : left).Path() / item.relativePath);
+                if (side && !side->isDirectory) {
+                    if (auto file = ComparedFile(console, left, right, leftActive, shift ? right : left, item.relativePath,
+                                                 logger))
+                        ShowTextFileViewer(console, *file);
+                }
                 break;
             }
             case VK_RETURN: {
@@ -1957,6 +2574,14 @@ std::optional<SyncPreset> DoCompareDirectories(Console& console, Panel& left, Pa
                 } else {
                     std::filesystem::path parent = std::filesystem::path(item.relativePath).parent_path();
                     for (Panel* p : {&left, &right}) {
+                        if (p->InProvider()) {  // EXT-002
+                            std::wstring dir = mc::JoinProviderRelative(*p->Provider(), p->ProviderPath(), parent);
+                            mc::ProviderEntry e;
+                            std::wstring err;
+                            if (p->Provider()->Stat(dir, e, {}, err) == mc::ProviderStatus::Ok && e.isDirectory)
+                                p->NavigateProvider(dir, item.name);
+                            continue;
+                        }
                         std::filesystem::path dir = p->Path() / parent;
                         std::error_code ec;
                         if (std::filesystem::is_directory(mc::ToLongPath(dir), ec)) p->NavigateTo(dir, item.name);
@@ -2163,12 +2788,14 @@ const wchar_t* JobStateLabel(JobState state) {
         case JobState::Done: return L"Done";
         case JobState::Cancelled: return L"Cancelled";
         case JobState::Failed: return L"Failed";
+        case JobState::Paused: return L"Paused";
     }
     return L"";
 }
 
 bool IsActiveJob(JobState state) {
-    return state == JobState::Queued || state == JobState::Running || state == JobState::WaitingForAnswer;
+    return state == JobState::Queued || state == JobState::Running || state == JobState::WaitingForAnswer ||
+           state == JobState::Paused;
 }
 
 std::wstring FormatJobLine(const Job& job) {
@@ -2247,19 +2874,42 @@ void ExecuteSyncPlan(Console& console, Panel& left, Panel& right, bool leftActiv
         return CompareStringOrdinal(a.c_str(), -1, b.c_str(), -1, TRUE) == CSTR_EQUAL;
     };
 
+    // EXT-002: a provider side (an archive, a server) goes through its own
+    // listing for the stale-preview check and through ProviderCopy for the work.
+    const bool viaProviders = left.InProvider() || right.InProvider();
+    auto readSide = [&](const Panel& panel, const std::wstring& dir, const std::wstring& name) -> std::optional<mc::CompareSide> {
+        if (!panel.InProvider()) return mc::ReadSide(std::filesystem::path(dir) / name);
+        mc::ProviderEntry e;
+        std::wstring err;
+        if (panel.Provider()->Stat(panel.Provider()->Join(dir, name), e, {}, err) != mc::ProviderStatus::Ok) return std::nullopt;
+        mc::CompareSide side;
+        side.isDirectory = e.isDirectory;
+        side.isReparsePoint = e.isLink;
+        side.attributes = e.attributes;
+        side.size = e.isDirectory ? 0 : e.size;
+        side.lastWriteUtc = e.modifiedUtc;
+        return side;
+    };
+    auto dirOf = [&](const Panel& panel, const std::filesystem::path& rel) {
+        return panel.InProvider() ? mc::JoinProviderRelative(*panel.Provider(), panel.ProviderPath(), rel)
+                                  : (panel.Path() / rel).wstring();
+    };
+
     OperationOutcome total;
     for (const mc::SyncGroup& group : mc::GroupForExecution(plan)) {
         if (total.cancelled) break;
         const bool isDelete = group.action == mc::SyncAction::DeleteRight || group.action == mc::SyncAction::DeleteLeft;
         const bool towardRight = group.action == mc::SyncAction::CopyToRight || group.action == mc::SyncAction::DeleteRight;
-        const std::filesystem::path leftDir = left.Path() / group.relativeDir;
-        const std::filesystem::path rightDir = right.Path() / group.relativeDir;
+        const std::wstring leftDirText = dirOf(left, group.relativeDir);
+        const std::wstring rightDirText = dirOf(right, group.relativeDir);
+        const std::filesystem::path leftDir = leftDirText;
+        const std::filesystem::path rightDir = rightDirText;
 
         std::vector<std::wstring> names, overwriteNames;
         for (size_t index : group.planIndices) {
             const mc::SyncItem& e = plan[index];
-            auto nowLeft = mc::ReadSide(leftDir / e.item.name);
-            auto nowRight = mc::ReadSide(rightDir / e.item.name);
+            auto nowLeft = readSide(left, leftDirText, e.item.name);
+            auto nowRight = readSide(right, rightDirText, e.item.name);
             bool stale = isDelete ? (towardRight ? mc::SideChanged(e.item.right, nowRight)
                                                  : mc::SideChanged(e.item.left, nowLeft))
                                   : (mc::SideChanged(e.item.left, nowLeft) || mc::SideChanged(e.item.right, nowRight));
@@ -2273,7 +2923,36 @@ void ExecuteSyncPlan(Console& console, Panel& left, Panel& right, bool leftActiv
         if (names.empty()) continue;
 
         OperationOutcome o;
-        if (isDelete) {
+        if (viaProviders) {
+            const Panel& source = towardRight ? left : right;
+            const Panel& target = towardRight ? right : left;
+            const std::wstring& sourceDir = towardRight ? leftDirText : rightDirText;
+            const std::wstring& targetDir = towardRight ? rightDirText : leftDirText;
+            mc::ProviderOpHandlers handlers = MakeProviderHandlers(console, left, right, leftActive, ui, logger);
+            if (isDelete && !target.InProvider()) {
+                // The local side keeps the Recycle Bin, as without providers.
+                ui.primaryPath = targetDir;
+                ui.destPath.clear();
+                o = DeleteItems(std::filesystem::path(targetDir), names, /*permanent=*/false, onItemStart, cancelPoll, onError);
+            } else if (isDelete) {
+                ui.primaryPath = target.Provider()->DisplayRoot() + targetDir;
+                ui.destPath.clear();
+                o = mc::ProviderDeleteItems(*target.Provider(), targetDir, names, handlers);
+            } else {
+                ui.primaryPath = ProviderOf(source).DisplayRoot() + sourceDir;
+                ui.destPath = ProviderOf(target).DisplayRoot() + targetDir;
+                handlers.onConflict = [&](const std::filesystem::path& d) {
+                    if (std::any_of(overwriteNames.begin(), overwriteNames.end(),
+                                    [&](const std::wstring& n) { return sameText(n, d.filename().wstring()); })) {
+                        ConflictAskResult confirmed;
+                        confirmed.choice = ConflictChoice::Overwrite;
+                        return confirmed;
+                    }
+                    return AskConflict(console, left, right, leftActive, d);
+                };
+                o = mc::ProviderCopyItems(ProviderOf(source), sourceDir, names, ProviderOf(target), targetDir, handlers);
+            }
+        } else if (isDelete) {
             const std::filesystem::path& dir = towardRight ? rightDir : leftDir;
             ui.primaryPath = dir.wstring();
             ui.destPath.clear();
@@ -2317,11 +2996,25 @@ void DoSynchronizeDirectories(Console& console, Panel& left, Panel& right, bool 
                               const std::optional<SyncPreset>& preset = std::nullopt) {
     auto redraw = [&]() { DrawFrame(console, left, right, leftActive); };
     if (RefuseCompareOfPanels(console, left, right, leftActive, kStrSyncTitle)) return;
-    if (mc::IsSameOrWithin(left.Path(), right.Path()) || mc::IsSameOrWithin(right.Path(), left.Path())) {
+    // EXT-002: one folder inside the other only matters on the same file system.
+    bool nested = false;
+    if (!left.InProvider() && !right.InProvider()) {
+        nested = mc::IsSameOrWithin(left.Path(), right.Path()) || mc::IsSameOrWithin(right.Path(), left.Path());
+    } else if (left.Provider() == right.Provider()) {
+        nested = mc::ProviderPathIsSameOrWithin(*left.Provider(), left.ProviderPath(), right.ProviderPath()) ||
+                 mc::ProviderPathIsSameOrWithin(*left.Provider(), right.ProviderPath(), left.ProviderPath());
+    }
+    if (nested) {
         ShowMessage(console, kStrSyncTitle, {kStrSyncInsideOther}, redraw);
         return;
     }
-    if (RefuseIfBusyWithJob(console, left, right, leftActive, {left.Path(), right.Path()})) return;  // FOP-014
+    for (Panel* p : {&left, &right}) {
+        if (RefuseWithoutCapability(console, left, right, leftActive, *p, mc::CapWrite, kStrSyncTitle)) return;
+    }
+    std::vector<std::filesystem::path> localRoots;
+    for (const Panel* p : {&left, &right})
+        if (!p->InProvider()) localRoots.push_back(p->Path());
+    if (RefuseIfBusyWithJob(console, left, right, leftActive, localRoots)) return;  // FOP-014
 
     // Remembered for the session only.
     struct SyncState {
@@ -2384,7 +3077,7 @@ void DoSynchronizeDirectories(Console& console, Panel& left, Panel& right, bool 
     mc::CompareOutcome outcome = RunCompareWithProgress(console, left, right, options);
     if (!outcome.leftListed || !outcome.rightListed) {
         ShowMessage(console, kStrSyncTitle,
-                    {kStrCompareCannotList, (outcome.leftListed ? right : left).Path().wstring()}, redraw);
+                    {kStrCompareCannotList, (outcome.leftListed ? right : left).LocationText()}, redraw);
         return;
     }
     if (outcome.cancelled) {
@@ -2424,7 +3117,7 @@ void DoSynchronizeDirectories(Console& console, Panel& left, Panel& right, bool 
     const wchar_t* arrow = syncOptions.direction == mc::SyncDirection::LeftToRight   ? L"  ->  "
                            : syncOptions.direction == mc::SyncDirection::RightToLeft ? L"  <-  "
                                                                                     : L"  <->  ";
-    const std::wstring header = left.Path().wstring() + arrow + right.Path().wstring() + L"  \x2014 " +
+    const std::wstring header = left.LocationText() + arrow + right.LocationText() + L"  \x2014 " +
                                 fields[0].choices[static_cast<size_t>(state.direction)] + L", " +
                                 fields[1].choices[static_cast<size_t>(state.method)];
     const mc::SyncAction deleteAction = syncOptions.direction == mc::SyncDirection::RightToLeft
@@ -2515,8 +3208,11 @@ void DoSynchronizeDirectories(Console& console, Panel& left, Panel& right, bool 
             case VK_F3:
                 if (current) {
                     const auto& side = shift ? current->item.right : current->item.left;
-                    if (side && !side->isDirectory)
-                        ShowTextFileViewer(console, (shift ? right : left).Path() / current->item.relativePath);
+                    if (side && !side->isDirectory) {
+                        if (auto file = ComparedFile(console, left, right, leftActive, shift ? right : left,
+                                                     current->item.relativePath, logger))
+                            ShowTextFileViewer(console, *file);
+                    }
                 }
                 break;
             case VK_F5: {
@@ -2525,7 +3221,7 @@ void DoSynchronizeDirectories(Console& console, Panel& left, Panel& right, bool 
                     break;
                 }
                 // D4: the explicit confirmation -- Back is first (the default), always shown.
-                std::vector<std::wstring> lines{left.Path().wstring() + arrow + right.Path().wstring()};
+                std::vector<std::wstring> lines{left.LocationText() + arrow + right.LocationText()};
                 if (s.copyRight > 0)
                     lines.push_back(L"Copy " + std::to_wstring(s.copyRight) + L" item(s) to the right (" +
                                     FormatHumanBytes(static_cast<double>(s.bytesRight)) + L")");
@@ -2542,9 +3238,10 @@ void DoSynchronizeDirectories(Console& console, Panel& left, Panel& right, bool 
                     if (names.size() > 5) lines.push_back(L"   ... and " + std::to_wstring(names.size() - 5) + L" more");
                 };
                 listSome(L"OVERWRITE", [](const mc::SyncItem& e) { return mc::Overwrites(e); });
-                listSome(L"DELETE on the right (Recycle Bin)",
+                // EXT-002: a provider has no Recycle Bin -- its deletions are permanent.
+                listSome(right.InProvider() ? L"DELETE on the right (permanently)" : L"DELETE on the right (Recycle Bin)",
                          [](const mc::SyncItem& e) { return e.action == mc::SyncAction::DeleteRight; });
-                listSome(L"DELETE on the left (Recycle Bin)",
+                listSome(left.InProvider() ? L"DELETE on the left (permanently)" : L"DELETE on the left (Recycle Bin)",
                          [](const mc::SyncItem& e) { return e.action == mc::SyncAction::DeleteLeft; });
                 int choice = ShowChoiceDialog(console, kStrSyncConfirmTitle, lines,
                                               {{L'B', kStrSyncBackLabel}, {L'S', kStrSyncGoLabel}, {L'C', kStrCancelLabel}},
@@ -2573,6 +3270,11 @@ void QueueCopyOrMove(Console& console, const Panel& left, const Panel& right, bo
         ShowMessage(console, kStrJobsTitle, {kStrQueuePluginRefused}, redraw);
         return;
     }
+    // EXT-002: jobs run on a worker thread; providers (plugin code) are only
+    // ever called from the main thread, so archives and servers stay foreground.
+    if (RefuseInsideProvider(console, left, right, leftActive, source, kStrJobsTitle, kStrProviderNoJobsHint) ||
+        RefuseInsideProvider(console, left, right, leftActive, dest, kStrJobsTitle, kStrProviderNoJobsHint))
+        return;
     std::vector<std::wstring> names = source.SelectionOrCursor();
     if (names.empty()) return;
     std::wstring verb = isMove ? kStrVerbMove : kStrVerbCopy;
@@ -2607,16 +3309,20 @@ void ServiceJobPrompts(Console& console, const Panel& left, const Panel& right, 
 // What the main loop remembers between passes, so a job's finish is noticed once.
 struct JobsWatch {
     std::map<uint64_t, JobState> seen;
-    size_t active = 0;
+    size_t active = 0;  // running + paused, as IsActiveJob counts them (queued excluded below)
     size_t queued = 0;
+    size_t paused = 0;
 };
 
-std::wstring FormatJobsTitle(size_t active, size_t queued) {
+// FOP-015: `active` includes the paused jobs; they are named separately.
+std::wstring FormatJobsTitle(size_t active, size_t queued, size_t paused = 0) {
     wchar_t base[64];
     swprintf_s(base, L"MyCommander - %S", MC_VERSION_STR);
     std::wstring title = base;
     if (active > 0 || queued > 0) {
-        title += L" - " + std::to_wstring(active) + L" running, " + std::to_wstring(queued) + L" queued";
+        title += L" - " + std::to_wstring(active - std::min(active, paused)) + L" running, ";
+        if (paused > 0) title += std::to_wstring(paused) + L" paused, ";
+        title += std::to_wstring(queued) + L" queued";
     }
     return title;
 }
@@ -2628,8 +3334,10 @@ void PollBackgroundJobs(Console& console, Panel& left, Panel& right, bool leftAc
     std::vector<Job> snapshot = jobs.Jobs();
     size_t active = 0;
     size_t queued = 0;
+    size_t paused = 0;
     for (const Job& job : snapshot) {
         if (job.state == JobState::Queued) ++queued;
+        if (job.state == JobState::Paused) ++paused;
         if (IsActiveJob(job.state)) ++active;
         auto seen = watch.seen.find(job.id);
         if (seen != watch.seen.end() && seen->second == job.state) continue;
@@ -2645,6 +3353,13 @@ void PollBackgroundJobs(Console& console, Panel& left, Panel& right, bool leftAc
             }
             ShowMessage(console, kStrJobsTitle, lines, [&]() { DrawFrame(console, left, right, leftActive); });
         }
+        // LIST-009: a finished move/delete job -- labels follow what moved, drop what is gone.
+        if (job.kind != JobKind::Copy) {
+            for (const auto& src : job.sources) {
+                const std::vector<std::wstring> one{src.filename().wstring()};
+                LabelsAfterMoveOrDelete(src.parent_path(), one, job.kind == JobKind::Move ? &job.destination : nullptr);
+            }
+        }
         for (Panel* panel : {&left, &right}) {
             bool touched = PathsEquivalent(panel->Path(), job.destination);
             for (const auto& src : job.sources) {
@@ -2653,29 +3368,52 @@ void PollBackgroundJobs(Console& console, Panel& left, Panel& right, bool leftAc
             if (touched) panel->Refresh();
         }
     }
-    if (active != watch.active || queued != watch.queued) {
+    if (active != watch.active || queued != watch.queued || paused != watch.paused) {
         watch.active = active;
         watch.queued = queued;
-        console.SetTitle(FormatJobsTitle(active, queued));
+        watch.paused = paused;
+        console.SetTitle(FormatJobsTitle(active, queued, paused));
     }
 }
 
 void ShowJobQueue(Console& console, const Panel& left, const Panel& right, bool leftActive, JobWorker& jobs) {
     auto redraw = [&]() { DrawFrame(console, left, right, leftActive); };
-    std::vector<Job> snapshot = jobs.Jobs();
-    if (snapshot.empty()) {
-        ShowMessage(console, kStrJobsTitle, {kStrJobsEmpty}, redraw);
+    // FOP-015: P pauses/resumes the selected job, A pauses all, R resumes all
+    // (the list reopens so the new state is visible); Enter/Del cancels as before.
+    int cursor = 0;
+    for (;;) {
+        std::vector<Job> snapshot = jobs.Jobs();
+        if (snapshot.empty()) {
+            ShowMessage(console, kStrJobsTitle, {kStrJobsEmpty}, redraw);
+            return;
+        }
+        std::vector<std::wstring> items(snapshot.size());
+        std::transform(snapshot.begin(), snapshot.end(), items.begin(), [](const Job& job) { return FormatJobLine(job); });
+        cursor = std::clamp(cursor, 0, static_cast<int>(items.size()) - 1);
+        mc::ListChoiceResult picked = ShowListChoiceWithKeys(
+            console, kStrJobsTitle, items, redraw, cursor, {VK_DELETE, 'P', 'A', 'R'}, kStrJobsHint);
+        if (picked.index < 0) return;
+        cursor = picked.index;
+        const Job& chosen = snapshot[static_cast<size_t>(picked.index)];
+        if (picked.key == 'P') {
+            if (chosen.state == JobState::Paused) jobs.Resume(chosen.id);
+            else jobs.Pause(chosen.id);
+            continue;
+        }
+        if (picked.key == 'A') {
+            jobs.PauseAll();
+            continue;
+        }
+        if (picked.key == 'R') {
+            jobs.ResumeAll();
+            continue;
+        }
+        if (!IsActiveJob(chosen.state)) return;
+        int answer = ShowChoiceDialog(console, kStrJobsTitle, {kStrJobsCancelQuestion},
+                                      {DialogOption{L'Y', L"es"}, DialogOption{L'N', L"o"}}, redraw);
+        if (answer == 0) jobs.Cancel(chosen.id);
         return;
     }
-    std::vector<std::wstring> items(snapshot.size());
-    std::transform(snapshot.begin(), snapshot.end(), items.begin(), [](const Job& job) { return FormatJobLine(job); });
-    int index = ShowListChoice(console, kStrJobsTitle, items, redraw, 0);
-    if (index < 0) return;
-    const Job& chosen = snapshot[static_cast<size_t>(index)];
-    if (!IsActiveJob(chosen.state)) return;
-    int answer = ShowChoiceDialog(console, kStrJobsTitle, {kStrJobsCancelQuestion},
-                                  {DialogOption{L'Y', L"es"}, DialogOption{L'N', L"o"}}, redraw);
-    if (answer == 0) jobs.Cancel(chosen.id);
 }
 
 // F10 with jobs still active: wait for them, cancel them, or stay. Returns true when the app may exit.
@@ -2699,6 +3437,8 @@ bool ConfirmQuitWithJobs(Console& console, Panel& left, Panel& right, bool leftA
         return true;
     }
     if (choice != 0) return false;
+    // FOP-015: waiting for a paused job would never end, so waiting resumes them.
+    jobs.ResumeAll();
     // Wait: keep answering prompts until the queue is idle. Esc gives up
     // waiting, cancels what's left, and quits.
     while (countActive() > 0) {
@@ -2715,10 +3455,6 @@ bool ConfirmQuitWithJobs(Console& console, Panel& left, Panel& right, bool leftA
     return true;
 }
 
-void SyncOtherPanelIfSamePath(const Panel& target, Panel& other) {
-    if (PathsEquivalent(target.Path(), other.Path())) other.Refresh();
-}
-
 void DoRename(Console& console, Panel& left, Panel& right, bool leftActive) {
     Panel& target = leftActive ? left : right;
     Panel& other = leftActive ? right : left;
@@ -2729,12 +3465,35 @@ void DoRename(Console& console, Panel& left, Panel& right, bool leftActive) {
     if (cursor < 0 || cursor >= static_cast<int>(entries.size())) return;
     const auto& entry = entries[cursor];
     if (entry.name == L"..") return;
+    if (target.InProvider()) {  // EXT-002
+        if (RefuseWithoutCapability(console, left, right, leftActive, target, mc::CapRename, kStrRenameTitle)) return;
+        std::wstring oldName = entry.name;
+        auto typed = ShowTextPrompt(console, kStrRenameTitle, oldName, redraw);
+        if (!typed || typed->empty() || *typed == oldName) return;
+        if (!IsPlainName(*typed)) {
+            ShowMessage(console, kStrRenameFailedTitle, {kStrProviderOnlyName}, redraw);
+            return;
+        }
+        std::wstring err;
+        mc::ProviderStatus st =
+            target.Provider()->Rename(target.ItemLocation(oldName), target.ItemLocation(*typed), {}, err);
+        target.NavigateProvider(target.ProviderPath(), st == mc::ProviderStatus::Ok ? *typed : oldName);
+        SyncOtherPanelIfSamePath(target, other);
+        if (st != mc::ProviderStatus::Ok)
+            ShowMessage(console, kStrRenameFailedTitle, {err.empty() ? mc::ProviderStatusText(st) : err}, redraw);
+        return;
+    }
     if (RefuseIfBusyWithJob(console, left, right, leftActive, {target.Path() / entry.name})) return;  // FOP-014
 
     auto newNameOpt = ShowTextPrompt(console, kStrRenameTitle, entry.name, redraw);
     if (!newNameOpt || newNameOpt->empty() || *newNameOpt == entry.name) return;
 
     RenameResult result = RenameItem(target.Path(), entry.name, *newNameOpt);
+    if (result.ok) LabelsAfterRename(target.Path() / entry.name, target.Path() / *newNameOpt);  // LIST-009
+    if (result.ok && _wcsicmp(entry.name.c_str(), newNameOpt->c_str()) != 0) {  // FOP-022 (case-only: not recorded)
+        UndoRecord(mc::UndoKind::Rename, L"rename " + entry.name + L" to " + *newNameOpt,
+                   {mc::MakeMovedItem(target.Path() / entry.name, target.Path() / *newNameOpt)});
+    }
     target.Refresh();
     SyncOtherPanelIfSamePath(target, other);
     if (!result.ok) {
@@ -2749,6 +3508,7 @@ void DoRename(Console& console, Panel& left, Panel& right, bool leftActive) {
 // mycommander.ini -- ERR-006 spirit: no operation state on disk).
 void DoGroupRename(Console& console, Panel& left, Panel& right, bool leftActive, Logger& logger) {
     Panel& target = leftActive ? left : right;
+    if (RefuseInsideProvider(console, left, right, leftActive, target, kStrProviderUnavailableTitle)) return;
     Panel& other = leftActive ? right : left;
     auto redraw = [&]() { DrawFrame(console, left, right, leftActive); };
     if (target.Content()) {
@@ -2882,6 +3642,32 @@ void DoGroupRename(Console& console, Panel& left, Panel& right, bool leftActive,
             };
             OperationOutcome outcome =
                 mc::RenameItems(target.Path(), mc::OrderRenames(plan, existing), onItemStart, onError);
+            for (const auto& item : plan.items) {  // LIST-009: labels follow the items that were renamed
+                if (item.status == mc::RenameStatus::Ok || item.status == mc::RenameStatus::CaseOnly)
+                    LabelsAfterRenameIfDone(target.Path() / item.oldName, target.Path() / item.newName);
+            }
+            {  // FOP-022: only a plain batch (no chains, swaps or case-only renames) is recorded
+                std::vector<mc::UndoItem> done;
+                bool tangled = false;
+                for (const auto& item : plan.items) {
+                    if (item.status != mc::RenameStatus::Ok && item.status != mc::RenameStatus::CaseOnly) continue;
+                    if (item.status == mc::RenameStatus::CaseOnly) {
+                        tangled = true;
+                        continue;
+                    }
+                    for (const auto& peer : plan.items) {
+                        if (&peer != &item && peer.status == mc::RenameStatus::Ok &&
+                            _wcsicmp(peer.newName.c_str(), item.oldName.c_str()) == 0)
+                            tangled = true;
+                    }
+                    std::error_code ec;
+                    const std::filesystem::path from = target.Path() / item.oldName, to = target.Path() / item.newName;
+                    if (std::filesystem::exists(to, ec) && !std::filesystem::exists(from, ec))
+                        done.push_back(mc::MakeMovedItem(from, to));
+                }
+                if (tangled) UndoClear();
+                else UndoRecord(mc::UndoKind::Rename, L"rename " + UndoCountText(done.size(), L"item"), std::move(done));
+            }
             // IS-0001 convention: the cursor lands on the first renamed item.
             target.NavigateTo(target.Path(), firstRenamed);
             SyncOtherPanelIfSamePath(target, other);
@@ -2896,11 +3682,28 @@ void DoMakeDirectory(Console& console, Panel& left, Panel& right, bool leftActiv
     Panel& other = leftActive ? right : left;
     auto redraw = [&]() { DrawFrame(console, left, right, leftActive); };
 
+    if (RefuseWithoutCapability(console, left, right, leftActive, target, mc::CapMkdir, kStrCreateFolderFailedTitle))
+        return;
     auto nameOpt = ShowTextPrompt(console, kStrNewFolderNamePrompt, L"", redraw);
     if (!nameOpt || nameOpt->empty()) return;
+    if (target.InProvider()) {  // EXT-002
+        if (!IsPlainName(*nameOpt)) {
+            ShowMessage(console, kStrCreateFolderFailedTitle, {kStrProviderOnlyName}, redraw);
+            return;
+        }
+        std::wstring err;
+        mc::ProviderStatus st = target.Provider()->MakeDirectory(target.ItemLocation(*nameOpt), {}, err);
+        target.NavigateProvider(target.ProviderPath(), *nameOpt);
+        SyncOtherPanelIfSamePath(target, other);
+        if (st != mc::ProviderStatus::Ok)
+            ShowMessage(console, kStrCreateFolderFailedTitle, {err.empty() ? mc::ProviderStatusText(st) : err}, redraw);
+        return;
+    }
     if (RefuseIfBusyWithJob(console, left, right, leftActive, {target.Path() / *nameOpt})) return;  // FOP-014
 
     auto result = CreateNewDirectory(target.Path(), *nameOpt);
+    if (result.ok)  // FOP-022
+        UndoRecord(mc::UndoKind::NewFolder, L"new folder " + *nameOpt, {mc::MakeCreatedItem(target.Path() / *nameOpt)});
     // IS-0001: select the new directory once the refresh lands, not just
     // preserve wherever the cursor already was.
     target.NavigateTo(target.Path(), *nameOpt);
@@ -2916,11 +3719,36 @@ void DoCreateNewFile(Console& console, Panel& left, Panel& right, bool leftActiv
     Panel& other = leftActive ? right : left;
     auto redraw = [&]() { DrawFrame(console, left, right, leftActive); };
 
+    if (RefuseWithoutCapability(console, left, right, leftActive, target, mc::CapWrite, kStrCreateFileFailedTitle))
+        return;
     auto nameOpt = ShowTextPrompt(console, kStrNewFileNamePrompt, L"", redraw);
     if (!nameOpt || nameOpt->empty()) return;
+    if (target.InProvider()) {  // EXT-002: never overwrites an existing entry (FOP-005)
+        std::wstring err;
+        mc::ProviderStatus st = mc::ProviderStatus::Failed;
+        mc::ProviderEntry existing;
+        std::wstring path = target.ItemLocation(*nameOpt);
+        if (!IsPlainName(*nameOpt)) {
+            err = kStrProviderOnlyName;
+        } else if (target.Provider()->Stat(path, existing, {}, err) == mc::ProviderStatus::Ok) {
+            err = L"\"" + *nameOpt + L"\" already exists.";
+        } else {
+            std::unique_ptr<mc::IWriteStream> out;
+            err.clear();
+            st = target.Provider()->OpenWrite(path, 0, 0, out, {}, err);
+            if (st == mc::ProviderStatus::Ok) st = out->Finish(err);
+        }
+        target.NavigateProvider(target.ProviderPath(), *nameOpt);
+        SyncOtherPanelIfSamePath(target, other);
+        if (st != mc::ProviderStatus::Ok)
+            ShowMessage(console, kStrCreateFileFailedTitle, {err.empty() ? mc::ProviderStatusText(st) : err}, redraw);
+        return;
+    }
     if (RefuseIfBusyWithJob(console, left, right, leftActive, {target.Path() / *nameOpt})) return;  // FOP-014
 
     auto result = CreateNewFile(target.Path(), *nameOpt);
+    if (result.ok)  // FOP-022
+        UndoRecord(mc::UndoKind::NewFile, L"new file " + *nameOpt, {mc::MakeCreatedItem(target.Path() / *nameOpt)});
     // IS-0001: select the new file once the refresh lands, not just
     // preserve wherever the cursor already was.
     target.NavigateTo(target.Path(), *nameOpt);
@@ -2938,15 +3766,23 @@ std::optional<std::filesystem::path> CursorFilePath(const Panel& panel) {
     if (cursor < 0 || cursor >= static_cast<int>(entries.size())) return std::nullopt;
     const auto& entry = entries[cursor];
     if (entry.name == L".." || entry.isDirectory) return std::nullopt;
+    if (panel.InProvider()) return std::nullopt;  // EXT-002: no local path -- see CursorFileForReading
     return panel.Path() / entry.name;
 }
 
-void DoView(Console& console, const Panel& left, const Panel& right, bool leftActive) {
+std::optional<std::filesystem::path> FetchProviderCursorFile(Console& console, const Panel& left, const Panel& right,
+                                                             bool leftActive, Logger& logger);
+
+// The cursor file as a local path to read: the file itself, or (EXT-002)
+// a fetched temporary copy of a provider file.
+std::optional<std::filesystem::path> CursorFileForReading(Console& console, const Panel& left, const Panel& right,
+                                                          bool leftActive, Logger& logger) {
     const Panel& target = leftActive ? left : right;
-    auto filePath = CursorFilePath(target);
-    if (!filePath) return;
-    ShowTextFileViewer(console, *filePath);
+    if (target.InProvider()) return FetchProviderCursorFile(console, left, right, leftActive, logger);
+    return CursorFilePath(target);
 }
+
+void DoView(Console& console, const std::filesystem::path& filePath) { ShowTextFileViewer(console, filePath); }
 
 // FEA-0003: Alt+Enter (also reachable from the top menu bar's View ->
 // Executable properties, FEA-0005) â€” General fields (name/size/modified)
@@ -2960,6 +3796,7 @@ void DoView(Console& console, const Panel& left, const Panel& right, bool leftAc
 // is needed.
 void DoShowFileProperties(Console& console, Panel& left, Panel& right, bool leftActive) {
     Panel& target = leftActive ? left : right;
+    if (RefuseInsideProvider(console, left, right, leftActive, target, kStrProviderUnavailableTitle)) return;
     auto filePath = CursorFilePath(target);
     if (!filePath) return;
     const Entry& entry = target.Entries()[static_cast<size_t>(target.Cursor())];
@@ -3021,8 +3858,9 @@ void RefreshPanelsForEditedFile(Panel& left, Panel& right, const std::filesystem
     // IS-0015: PathsEquivalent, not a plain path == (case-sensitive even on
     // Windows, and doesn't normalize a trailing separator) -- the same fix
     // applied to every other single-panel-refresh call site below.
-    if (PathsEquivalent(left.Path(), parent)) left.NavigateTo(left.Path(), name);
-    if (PathsEquivalent(right.Path(), parent)) right.NavigateTo(right.Path(), name);
+    // EXT-002: a panel inside a provider isn't showing that folder; leave it be.
+    if (!left.InProvider() && PathsEquivalent(left.Path(), parent)) left.NavigateTo(left.Path(), name);
+    if (!right.InProvider() && PathsEquivalent(right.Path(), parent)) right.NavigateTo(right.Path(), name);
 }
 
 // IS-0002: called once per main-loop iteration â€” the same ~16 ms cadence
@@ -3056,6 +3894,7 @@ void PollPendingEdits(std::vector<PendingEdit>& pendingEdits, Panel& left, Panel
 void DoEdit(Console& console, Panel& left, Panel& right, bool leftActive, const Config& config, Logger& logger,
            std::vector<PendingEdit>& pendingEdits) {
     Panel& target = leftActive ? left : right;
+    if (RefuseInsideProvider(console, left, right, leftActive, target, kStrProviderUnavailableTitle)) return;
     auto filePath = CursorFilePath(target);
     if (!filePath) return;
 
@@ -3183,6 +4022,81 @@ void PollConfigWatch(ConfigWatch& watch, Config& config, Console& console, Panel
     }
 }
 
+// LIST-007: per-panel automatic refresh when the shown folder is changed from
+// outside. Polled once per main-loop iteration like PollConfigWatch; no thread.
+struct AutoRefreshState {
+    mc::FolderWatch watch;
+    mc::Debouncer debounce;
+    std::wstring armedPath;
+    bool armed = false;
+    bool contentWasShown = false;
+    uint64_t seenStarts = 0;
+    ULONGLONG lastPollMs = 0;
+};
+
+void PollAutoRefresh(AutoRefreshState& s, Panel& panel, const Config& config, bool busy) {
+    if (config.autoRefresh == mc::AutoRefreshMode::Off) {
+        s.watch.Close();
+        s.armed = false;
+        s.debounce.Clear();
+        return;
+    }
+    const ULONGLONG now = GetTickCount64();
+
+    // A plugin or tree view shows its own content, not the folder underneath:
+    // nothing to refresh until it's released (then the folder is re-listed).
+    if (panel.Content() != nullptr) {
+        s.watch.Close();
+        s.armed = false;
+        s.debounce.Clear();
+        s.contentWasShown = true;
+        return;
+    }
+    // EXT-002: a provider has no folder to watch (leaving it re-lists anyway).
+    if (panel.InProvider()) {
+        s.watch.Close();
+        s.armed = false;
+        s.debounce.Clear();
+        return;
+    }
+
+    const std::wstring path = panel.Path().wstring();
+    if (!s.armed || s.armedPath != path) {
+        s.watch.Arm(path);
+        s.armed = true;
+        s.armedPath = path;
+        s.seenStarts = panel.RefreshStarts();
+        s.lastPollMs = now;
+        s.debounce.Clear();
+        if (s.contentWasShown) {
+            s.contentWasShown = false;
+            s.debounce.Signal(now);
+        }
+    }
+
+    // Anything signalled before a listing started is covered by that listing.
+    if (panel.RefreshStarts() != s.seenStarts) {
+        s.watch.Drain();
+        s.debounce.Clear();
+        s.seenStarts = panel.RefreshStarts();
+    }
+
+    if (s.watch.Poll()) s.debounce.Signal(now);
+
+    if (config.autoRefresh == mc::AutoRefreshMode::Poll && s.watch.GetState() != mc::FolderWatch::State::Active &&
+        now - s.lastPollMs >= static_cast<ULONGLONG>(config.autoRefreshPollSeconds) * 1000) {
+        s.lastPollMs = now;
+        s.debounce.Signal(now);
+    }
+
+    if (s.debounce.Due(now) && !busy && !panel.IsLoading()) {
+        s.watch.Drain();
+        panel.RefreshPreservingState();
+        s.debounce.Clear();
+        s.seenStarts = panel.RefreshStarts();
+    }
+}
+
 // IS-0006: Ctrl+F11 opens the config file in the external editor (same
 // resolution/launch logic as F4's DoEdit) and starts a ConfigWatch so
 // PollConfigWatch can reload and apply it live once the user saves.
@@ -3307,6 +4221,7 @@ void DoEditKeyBindings(Console& console, const Panel& left, const Panel& right, 
 // file is never run without a deliberate, explicit action (VEE-008).
 void DoExecute(Console& console, Panel& left, Panel& right, bool leftActive) {
     Panel& target = leftActive ? left : right;
+    if (RefuseInsideProvider(console, left, right, leftActive, target, kStrProviderUnavailableTitle)) return;
     Panel& other = leftActive ? right : left;
     auto filePath = CursorFilePath(target);
     if (!filePath) return;
@@ -3435,8 +4350,7 @@ void RunFileAction(Console& console, const Panel& left, const Panel& right, bool
 // F3 (and Enter with enterFileAction=view): the default "view" action, or
 // the built-in viewer when none is registered -- exactly the old F3.
 void DoViewAction(Console& console, const Panel& left, const Panel& right, bool leftActive, Logger& logger) {
-    const Panel& target = leftActive ? left : right;
-    auto filePath = CursorFilePath(target);
+    auto filePath = CursorFileForReading(console, left, right, leftActive, logger);
     if (!filePath) return;
     const auto& table = CurrentFileActions(console, left, right, leftActive, logger);
     auto action = mc::DefaultFileAction(table, filePath->filename().wstring(), mc::FileActionType::View);
@@ -3453,11 +4367,11 @@ void DoViewAction(Console& console, const Panel& left, const Panel& right, bool 
             if (gPluginManager->ShowPluginView(viewers[pluginIndex].pluginId, *filePath)) return;
             auto redraw = [&]() { DrawFrame(console, left, right, leftActive); };
             ShowMessage(console, kStrViewerPluginTitle, {FormatViewerPluginFailed(viewers[pluginIndex].name)}, redraw);
-            DoView(console, left, right, leftActive);
+            DoView(console, *filePath);
             return;
         }
         case mc::ViewRoute::BuiltIn:
-            DoView(console, left, right, leftActive);
+            DoView(console, *filePath);
             return;
     }
 }
@@ -3465,8 +4379,7 @@ void DoViewAction(Console& console, const Panel& left, const Panel& right, bool 
 // Shift+Enter (and Enter with enterFileAction=open): the default "open"
 // action, or the Windows association when none is registered.
 void DoOpenAction(Console& console, const Panel& left, const Panel& right, bool leftActive, Logger& logger) {
-    const Panel& target = leftActive ? left : right;
-    auto filePath = CursorFilePath(target);
+    auto filePath = CursorFileForReading(console, left, right, leftActive, logger);
     if (!filePath) return;
     const auto& table = CurrentFileActions(console, left, right, leftActive, logger);
     auto action = mc::DefaultFileAction(table, filePath->filename().wstring(), mc::FileActionType::Open);
@@ -3481,8 +4394,7 @@ void DoOpenAction(Console& console, const Panel& left, const Panel& right, bool 
 // two built-ins, so a non-default one can be picked. The effective default
 // of each type is marked with '*'.
 void DoChooseAction(Console& console, Panel& left, Panel& right, bool leftActive, Logger& logger) {
-    Panel& target = leftActive ? left : right;
-    auto filePath = CursorFilePath(target);
+    auto filePath = CursorFileForReading(console, left, right, leftActive, logger);
     if (!filePath) return;
     const auto& table = CurrentFileActions(console, left, right, leftActive, logger);
     std::wstring name = filePath->filename().wstring();
@@ -3549,6 +4461,623 @@ void DoChooseAction(Console& console, Panel& left, Panel& right, bool leftActive
 // adds), Del removes (after a Yes/No), F2 renames. Re-read from disk every
 // time it opens -- the file is tiny, and that picks up hand edits with no
 // watch to manage. Saved immediately after each change.
+// NAV-017: the recently visited local folders of both panels, newest first.
+// Module state like gJobWorker: the recording hook, the popup and the load/save
+// at start/exit all reach it without threading it through every signature.
+mc::RecentLocations gRecentFolders;
+
+// Called every main-loop iteration for each panel. A location is recorded once
+// it has settled on a listable local folder; plugin content, a provider and an
+// unreachable location are never recorded. `lastRecorded` is the loop's per-side
+// memory, so each change is noted exactly once.
+void RecordRecentFolder(const Panel& panel, std::wstring& lastRecorded) {
+    if (panel.Content() != nullptr || panel.InProvider() || panel.LocationInaccessible()) return;
+    const std::wstring current = panel.Path().wstring();
+    if (current.empty() || current == lastRecorded) return;
+    lastRecorded = current;
+    gRecentFolders.Note(panel.Path());
+}
+
+// NAV-017: Alt+F12 / Commands > Recent folders. Enter goes (the active panel,
+// through NavigateTo so it lands in that panel's own history too); Del removes
+// the entry (only a list entry, so no confirmation); F2 adds it to the hotlist.
+// A folder that no longer exists is not probed here: NavigateTo shows the usual
+// LIST-006 banner, and an offline share can't stall the list.
+void DoRecentFolders(Console& console, Panel& left, Panel& right, bool leftActive, Logger& logger) {
+    Panel& target = leftActive ? left : right;
+    auto redraw = [&]() { DrawFrame(console, left, right, leftActive); };
+    int focus = 0;
+    for (;;) {
+        const std::vector<std::filesystem::path> entries = gRecentFolders.Entries();
+        if (entries.empty()) {
+            ShowMessage(console, kStrRecentTitle, {kStrRecentEmpty}, redraw);
+            return;
+        }
+        std::vector<std::wstring> rows(entries.size());
+        std::transform(entries.begin(), entries.end(), rows.begin(), [](const std::filesystem::path& p) { return p.wstring(); });
+        focus = std::clamp(focus, 0, static_cast<int>(rows.size()) - 1);
+        auto choice = mc::ShowListChoiceWithKeys(console, kStrRecentTitle, rows, redraw, focus, {VK_DELETE, VK_F2},
+                                                 kStrRecentHint);
+        if (choice.index < 0) return;
+        focus = choice.index;
+        const std::filesystem::path& folder = entries[static_cast<size_t>(choice.index)];
+
+        if (choice.key == VK_DELETE) {
+            gRecentFolders.Remove(folder);
+            continue;
+        }
+        if (choice.key == VK_F2) {
+            const std::filesystem::path file = mc::FavoritesFilePath();
+            auto loaded = mc::LoadFavoritesFrom(file);
+            int existing = mc::FindFavoriteByPath(loaded.favorites, folder);
+            if (existing >= 0) {
+                ShowMessage(console, kStrHotlistTitle,
+                            {FormatHotlistAlreadyThere(loaded.favorites[static_cast<size_t>(existing)].name)}, redraw);
+                continue;
+            }
+            loaded.favorites.push_back({mc::DefaultFavoriteName(folder), folder});
+            if (!mc::SaveFavoritesTo(file, loaded.favorites)) {
+                logger.Log(LogLevel::Warning, L"Favorites: could not save \"" + file.wstring() + L"\"");
+                ShowMessage(console, kStrHotlistTitle, {kStrHotlistCannotSave}, redraw);
+            }
+            continue;
+        }
+        target.NavigateTo(folder);  // NAV-009 / LIST-006 handle reparse points and unreachable folders
+        return;
+    }
+}
+
+// LIST-009: labels apply to local files and folders only.
+bool RefuseLabelsHere(Console& console, const Panel& left, const Panel& right, bool leftActive, const Panel& target) {
+    if (target.Content() == nullptr && !target.InProvider()) return false;
+    auto redraw = [&]() { DrawFrame(console, left, right, leftActive); };
+    ShowMessage(console, kStrLabelsTitle, {kStrLabelsLocalOnly}, redraw);
+    return true;
+}
+
+// Sets `label` (0 clears) on the selection, or on the cursor entry when nothing is
+// selected, then saves. Tells the user when the list is full or can't be saved.
+void ApplyLabelToSelection(Console& console, const Panel& left, const Panel& right, bool leftActive, Panel& target,
+                           int label) {
+    auto redraw = [&]() { DrawFrame(console, left, right, leftActive); };
+    bool full = false;
+    for (const auto& name : target.SelectionOrCursor()) {
+        if (!gLabels.Set(target.Path() / name, label)) full = true;
+    }
+    if (full) ShowMessage(console, kStrLabelsTitle, {kStrLabelsFull}, redraw);
+    if (!PersistLabels()) ShowMessage(console, kStrLabelsTitle, {kStrLabelsCannotSave}, redraw);
+}
+
+// Ctrl+L: the next label of the cursor entry (none, 1..6, none ...) goes onto every
+// selected entry, so a mixed selection becomes uniform.
+void DoCycleLabel(Console& console, Panel& left, Panel& right, bool leftActive) {
+    Panel& target = leftActive ? left : right;
+    if (RefuseLabelsHere(console, left, right, leftActive, target)) return;
+    const auto& entries = target.Entries();
+    std::vector<std::wstring> names = target.SelectionOrCursor();
+    if (names.empty()) return;  // only ".." under the cursor
+    std::wstring basis = names.front();
+    if (target.Cursor() >= 0 && target.Cursor() < static_cast<int>(entries.size()) &&
+        entries[static_cast<size_t>(target.Cursor())].name != L"..")
+        basis = entries[static_cast<size_t>(target.Cursor())].name;
+    const int next = (gLabels.Get(target.Path() / basis) + 1) % (mc::kLabelCount + 1);
+    ApplyLabelToSelection(console, left, right, leftActive, target, next);
+}
+
+// Ctrl+Shift+L: the chooser -- set a specific label, clear it, select every entry in
+// this folder carrying the cursor entry's label, or drop the labels of files that no
+// longer exist under this folder.
+void DoLabelMenu(Console& console, Panel& left, Panel& right, bool leftActive) {
+    Panel& target = leftActive ? left : right;
+    if (RefuseLabelsHere(console, left, right, leftActive, target)) return;
+    auto redraw = [&]() { DrawFrame(console, left, right, leftActive); };
+
+    std::vector<std::wstring> items;
+    for (int i = 1; i <= mc::kLabelCount; ++i) items.push_back(FormatLabelChoice(i));
+    const int clearIndex = static_cast<int>(items.size());
+    items.push_back(kStrLabelsClear);
+    items.push_back(kStrLabelsSelectSame);
+    items.push_back(kStrLabelsCleanup);
+    const int choice = ShowListChoice(console, kStrLabelsTitle, items, redraw, 0);
+    if (choice < 0) return;
+
+    if (choice <= clearIndex) {  // 1..6 set, then clear (label 0)
+        ApplyLabelToSelection(console, left, right, leftActive, target, choice < clearIndex ? choice + 1 : 0);
+        return;
+    }
+    if (choice == clearIndex + 1) {  // select entries with the cursor entry's label
+        const auto& entries = target.Entries();
+        if (target.Cursor() < 0 || target.Cursor() >= static_cast<int>(entries.size())) return;
+        const int wanted = gLabels.Get(target.Path() / entries[static_cast<size_t>(target.Cursor())].name);
+        if (wanted == 0) {
+            ShowMessage(console, kStrLabelsTitle, {kStrLabelsNoneOnCursor}, redraw);
+            return;
+        }
+        for (size_t i = 0; i < entries.size(); ++i) {
+            if (entries[i].name != L".." && gLabels.Get(target.Path() / entries[i].name) == wanted)
+                target.SetEntrySelected(static_cast<int>(i), true);
+        }
+        return;
+    }
+    // Cleanup: only labels at or under this folder, one existence probe each.
+    std::wstring prefix = mc::LabelPathKey(target.Path());
+    if (prefix.empty() || prefix.back() != L'\\') prefix += L'\\';
+    const size_t removed = gLabels.RemoveIf([&](const std::filesystem::path& p) {
+        const std::wstring key = mc::LabelPathKey(p);
+        if (key.size() <= prefix.size() || key.compare(0, prefix.size(), prefix) != 0) return false;
+        std::error_code ec;
+        return !std::filesystem::exists(p, ec) && !ec;
+    });
+    if (removed > 0) PersistLabels();
+    ShowMessage(console, kStrLabelsTitle, {FormatLabelsCleanedUp(removed)}, redraw);
+}
+
+// SRC-009: Commands > Find empty folders (Alt+Shift+F7). Lists the empty
+// folders below the active panel's folder (EmptyFolders.h's conservative rules),
+// goes to one with Enter, and deletes one (Del) or all (A) to the Recycle Bin --
+// only after a confirmation that is never skippable by config, with each folder
+// re-checked immediately before its deletion. Local folders only.
+// FOP-023 (Commands > Restore from Recycle Bin, menu only): lists the current
+// user's Recycle Bin, newest deletion first. Enter puts the highlighted item
+// back where it came from; A puts all of them back after one confirmation.
+// Never overwrites: an item whose original name is taken again is reported
+// and left in the bin.
+// FOP-024 (File > Secure delete, menu only, never skippable by config): overwrite
+// each file (zero pass, random pass) after a random rename, then delete it
+// permanently. The confirmation states what this cannot guarantee. Local
+// panels only; a link is removed as itself, a compressed/sparse/encrypted file
+// is refused and left in place. Not undoable.
+void DoSecureDelete(Console& console, Panel& left, Panel& right, bool leftActive, Logger& logger) {
+    Panel& target = leftActive ? left : right;
+    Panel& other = leftActive ? right : left;
+    auto redraw = [&]() { DrawFrame(console, left, right, leftActive); };
+    if (target.Content() != nullptr || target.InProvider()) {
+        ShowMessage(console, kStrSecureDeleteTitle, {kStrSecureDeleteLocalOnly}, redraw);
+        return;
+    }
+    std::vector<std::wstring> items = target.SelectionOrCursor();
+    if (items.empty()) return;
+    if (RefuseIfBusyWithJob(console, left, right, leftActive, ItemPaths(target.Path(), items))) return;
+
+    std::vector<std::wstring> lines;
+    lines.push_back(items.size() == 1 ? L"\"" + items[0] + L"\"" : FormatItemCount(items.size()));
+    lines.push_back(kStrSecureDeleteIntro);
+    lines.push_back(kStrSecureDeleteLimitsHeading);
+    lines.push_back(kStrSecureDeleteLimitSsd);
+    lines.push_back(kStrSecureDeleteLimitJournal);
+    lines.push_back(kStrSecureDeleteLimitCopies);
+    lines.push_back(kStrSecureDeleteLimitCaches);
+    lines.push_back(kStrSecureDeleteAdvice);
+    lines.push_back(kStrSecureDeleteReadOnlyNote);
+    if (ShowChoiceDialog(console, kStrSecureDeleteTitle, lines, {{L'Y', kStrYesLabel}, {L'N', kStrNoLabel}}, redraw) != 0)
+        return;
+
+    ProgressUi ui{console, left, right, leftActive, kStrVerbSecureDeleting};
+    ui.primaryPath = target.Path().wstring();
+    bool escaped = false;
+    size_t index = 0;
+    mc::SecureHooks hooks;
+    hooks.cancel = [&]() { return escaped || ui.PollCancel(); };
+    auto onFile = [&](const std::filesystem::path& p) {
+        if (!ui.OnItemStart(p.filename().wstring(), static_cast<int>(index), static_cast<int>(items.size()))) escaped = true;
+    };
+
+    OperationOutcome outcome;
+    std::vector<std::wstring> gone;
+    for (index = 0; index < items.size(); ++index) {
+        const std::filesystem::path path = target.Path() / items[index];
+        if (!ui.OnItemStart(items[index], static_cast<int>(index), static_cast<int>(items.size()))) {
+            outcome.cancelled = true;
+            break;
+        }
+        mc::SecureTreeOutcome r = mc::SecureDeleteTree(path, hooks, onFile);
+        for (const auto& p : r.problems) {
+            logger.Log(LogLevel::Error, L"Secure delete: " + p.first + L": " + p.second);
+            outcome.failed.push_back({p.first, p.second});
+        }
+        outcome.succeeded += r.erased + r.links;
+        if (r.cancelled) {
+            outcome.cancelled = true;
+            break;
+        }
+        if (mc::GetAttributesOrInvalid(path) == INVALID_FILE_ATTRIBUTES) gone.push_back(items[index]);
+    }
+    if (outcome.succeeded > 0 || !gone.empty()) UndoClear();  // FOP-022: not undoable
+    if (!gone.empty()) LabelsAfterMoveOrDelete(target.Path(), gone, nullptr);  // LIST-009
+    target.Refresh();
+    SyncOtherPanelIfSamePath(target, other);
+    ReportOutcome(console, left, right, leftActive, kStrVerbSecureDelete, outcome, logger);
+}
+
+void DoRestoreFromBin(Console& console, Panel& left, Panel& right, bool leftActive, Logger& logger) {
+    auto redraw = [&]() { DrawFrame(console, left, right, leftActive); };
+    std::wstring error;
+    std::unique_ptr<mc::IRecycleBin> bin = mc::OpenShellRecycleBin(error);
+    if (!bin) {
+        ShowMessage(console, kStrRestoreBinTitle, {error}, redraw);
+        return;
+    }
+    auto exists = [](const std::filesystem::path& p) { return mc::GetAttributesOrInvalid(p) != INVALID_FILE_ATTRIBUTES; };
+    size_t restoredTotal = 0;
+    int focus = 0;
+    for (;;) {
+        std::vector<mc::RecycleBinItem> items = bin->List(error);
+        if (items.empty()) {
+            ShowMessage(console, kStrRestoreBinTitle, {error.empty() ? std::wstring(kStrRestoreBinEmpty) : error}, redraw);
+            break;
+        }
+        std::vector<std::wstring> rows;
+        for (const auto& item : items) rows.push_back(mc::FormatRecycleBinRow(item));
+        if (focus >= static_cast<int>(rows.size())) focus = static_cast<int>(rows.size()) - 1;
+        auto picked = mc::ShowListChoiceWithKeys(console, kStrRestoreBinTitle, rows, redraw, focus, {static_cast<WORD>('A')},
+                                                 kStrRestoreBinHint);
+        if (picked.index < 0) break;
+        focus = picked.index;
+        std::vector<const mc::RecycleBinItem*> chosen;
+        if (picked.key == static_cast<WORD>('A')) {
+            std::vector<std::wstring> lines{L"Restore all " + std::to_wstring(items.size()) + L" item(s) to their original places?"};
+            if (ShowChoiceDialog(console, kStrRestoreBinTitle, lines, {{L'Y', kStrYesLabel}, {L'N', kStrNoLabel}}, redraw) != 0)
+                continue;
+            for (const auto& item : items) chosen.push_back(&item);
+        } else {
+            chosen.push_back(&items[static_cast<size_t>(picked.index)]);
+        }
+        std::vector<std::wstring> failures;
+        size_t restored = 0;
+        for (const mc::RecycleBinItem* item : chosen) {
+            mc::RestoreCheck check = mc::CheckRestore(*item, exists);
+            std::wstring why;
+            if (!check.ok) {
+                failures.push_back(check.message);
+            } else if (bin->Restore(*item, why)) {
+                ++restored;
+                logger.Log(LogLevel::Info, L"Restored from Recycle Bin: \"" + item->originalPath.wstring() + L"\"");
+            } else {
+                failures.push_back(why);
+                logger.Log(LogLevel::Error, L"Restore failed: \"" + item->originalPath.wstring() + L"\": " + why);
+            }
+        }
+        restoredTotal += restored;
+        left.Refresh();
+        right.Refresh();
+        if (!failures.empty()) {
+            std::vector<std::wstring> lines{L"Restored " + std::to_wstring(restored) + L" of " +
+                                            std::to_wstring(chosen.size()) + L" item(s). Not restored:"};
+            for (size_t i = 0; i < failures.size() && i < 6; ++i) lines.push_back(failures[i]);
+            if (failures.size() > 6) lines.push_back(L"... and " + std::to_wstring(failures.size() - 6) + L" more");
+            ShowMessage(console, kStrRestoreBinTitle, lines, redraw);
+        } else if (chosen.size() > 1) {
+            break;
+        }
+    }
+    if (restoredTotal > 0) gTransientNote = L"Restored " + UndoCountText(restoredTotal, L"item") + L" from the Recycle Bin";
+}
+
+// NAV-019: opens Explorer on the active folder with the cursor entry (or the first selected one) selected.
+void DoRevealInExplorer(Console& console, Panel& left, Panel& right, bool leftActive, Logger& logger) {
+    Panel& target = leftActive ? left : right;
+    auto redraw = [&]() { DrawFrame(console, left, right, leftActive); };
+    if (target.Content() != nullptr || target.InProvider() || target.LocationInaccessible()) {
+        ShowMessage(console, kStrRevealTitle, {kStrRevealLocalOnly}, redraw);
+        return;
+    }
+    const mc::RevealTarget reveal = mc::RevealTargetFor(target.Path(), target.SelectionOrCursor());
+    const std::wstring error = mc::RevealInExplorer(reveal);
+    if (!error.empty()) {
+        logger.Log(LogLevel::Warning, L"Show in Explorer failed: \"" + target.Path().wstring() + L"\"");
+        ShowMessage(console, kStrRevealTitle, {error}, redraw);
+        return;
+    }
+    if (reveal.moreThanOne) gTransientNote = kStrRevealFirstOnly;
+}
+
+// FOP-026: creates "<name> - Shortcut.lnk" for each selected item (or the cursor entry), in the active folder or on
+// the desktop. Never overwrites: a taken name gets " (2)". Local folders only; not undoable (a new file only).
+void DoCreateShortcut(Console& console, Panel& left, Panel& right, bool leftActive, Logger& logger) {
+    Panel& target = leftActive ? left : right;
+    Panel& other = leftActive ? right : left;
+    auto redraw = [&]() { DrawFrame(console, left, right, leftActive); };
+    if (target.Content() != nullptr || target.InProvider()) {
+        ShowMessage(console, kStrShortcutTitle, {kStrShortcutLocalOnly}, redraw);
+        return;
+    }
+    std::vector<std::wstring> items = target.SelectionOrCursor();
+    if (items.empty()) return;  // only ".." under the cursor
+
+    std::vector<mc::FormField> fields(1);
+    fields[0].kind = mc::FormFieldKind::Choice;
+    fields[0].label = L"Create in";
+    fields[0].choices = {L"This folder", L"The desktop"};
+    if (!mc::ShowFormDialog(console, kStrShortcutTitle, fields, redraw)) return;
+
+    std::filesystem::path destination = target.Path();
+    if (fields[0].choiceIndex == 1) {
+        PWSTR known = nullptr;
+        const bool found = SUCCEEDED(SHGetKnownFolderPath(FOLDERID_Desktop, 0, nullptr, &known)) && known != nullptr;
+        if (found) destination = known;
+        if (known != nullptr) CoTaskMemFree(known);
+        if (!found) {
+            ShowMessage(console, kStrShortcutTitle, {kStrShortcutNoDesktop}, redraw);
+            return;
+        }
+    }
+
+    OperationOutcome outcome;
+    for (const std::wstring& name : items) {
+        const std::filesystem::path itemPath = target.Path() / name;
+        auto exists = [&](const std::wstring& candidate) {
+            return mc::GetAttributesOrInvalid(destination / candidate) != INVALID_FILE_ATTRIBUTES;
+        };
+        const std::wstring linkName = mc::ShortcutNameFor(name, exists);
+        if (linkName.empty()) {
+            outcome.failed.push_back({name, kStrShortcutNameTooLong});
+            continue;
+        }
+        const std::wstring error = mc::CreateShortcutFile(destination / linkName, itemPath, target.Path(), itemPath.wstring());
+        if (error.empty()) {
+            ++outcome.succeeded;
+            logger.Log(LogLevel::Info, L"Created shortcut \"" + (destination / linkName).wstring() + L"\"");
+        } else {
+            outcome.failed.push_back({name, error});
+        }
+    }
+    target.Refresh();
+    other.Refresh();  // the destination may be the other panel's folder
+    ReportOutcome(console, left, right, leftActive, kStrShortcutVerb, outcome, logger);
+    if (outcome.failed.empty() && outcome.succeeded > 0)
+        gTransientNote = L"Created " + UndoCountText(static_cast<size_t>(outcome.succeeded), L"shortcut");
+}
+
+// LIST-012: writes the active panel's listing (or its selection, optionally with everything below) to a
+// UTF-8 CSV (with a BOM, so Excel reads Unicode names) or tab-separated text file.
+void DoExportListing(Console& console, Panel& left, Panel& right, bool leftActive, Logger& logger) {
+    Panel& target = leftActive ? left : right;
+    auto redraw = [&]() { DrawFrame(console, left, right, leftActive); };
+    if (target.Content() != nullptr || target.InProvider()) {
+        ShowMessage(console, kStrExportTitle, {kStrExportLocalOnly}, redraw);
+        return;
+    }
+    // A reference (cppcheck: no copy needed): the panel does not navigate while the dialogs below are open. The earlier
+    // form was a copy, `const std::filesystem::path folder = target.Path();` -- it can be reverted to that if the panel
+    // ever may change its folder during this function; the cost of the copy is one path per export.
+    const std::filesystem::path& folder = target.Path();
+
+    std::filesystem::path documents = folder;
+    PWSTR known = nullptr;
+    if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_Documents, 0, nullptr, &known)) && known != nullptr) documents = known;
+    if (known != nullptr) CoTaskMemFree(known);
+
+    // Remembered for the session only.
+    static bool lastText = false;
+    static bool lastSubfolders = false;
+    const bool offeredText = lastText;
+    std::vector<mc::FormField> fields(4);
+    fields[0].kind = mc::FormFieldKind::Choice;
+    fields[0].label = L"Format";
+    fields[0].choices = {L"CSV (UTF-8 with BOM)", L"Tab-separated text (UTF-8)"};
+    fields[0].choiceIndex = offeredText ? 1 : 0;
+    fields[1].kind = mc::FormFieldKind::Choice;
+    fields[1].label = L"What";
+    fields[1].choices = {L"Whole folder", L"Selection only"};
+    fields[1].choiceIndex = target.SelectedCount() > 0 ? 1 : 0;
+    fields[2].kind = mc::FormFieldKind::Checkbox;
+    fields[2].label = L"Include subfolders";
+    fields[2].boolValue = lastSubfolders;
+    fields[3].kind = mc::FormFieldKind::Text;
+    fields[3].label = L"Output file";
+    SYSTEMTIME now;
+    GetLocalTime(&now);
+    auto defaultOutput = [&](bool text) {
+        std::wstring folderName = folder.filename().wstring();
+        if (folderName.empty()) folderName = L"drive";
+        return (documents / mc::DefaultListingFileName(folderName, now.wYear, now.wMonth, now.wDay, now.wHour,
+                                                       now.wMinute, text ? mc::ListingFormat::Text : mc::ListingFormat::Csv))
+            .wstring();
+    };
+    fields[3].text = defaultOutput(offeredText);
+    fields[3].textCursor = fields[3].text.size();
+    const std::wstring offeredName = fields[3].text;
+    if (!mc::ShowFormDialog(console, kStrExportTitle, fields, redraw)) return;
+    const bool asText = fields[0].choiceIndex == 1;
+    const bool selectionOnly = fields[1].choiceIndex == 1;
+    const bool subfolders = fields[2].boolValue;
+    lastText = asText;
+    lastSubfolders = subfolders;
+    std::wstring outText = fields[3].text;
+    // Left as offered but the format changed: keep the extension in step with the format.
+    if (outText == offeredName && asText != offeredText) outText = defaultOutput(asText);
+    if (outText.empty()) {
+        ShowMessage(console, kStrExportTitle, {kStrExportNeedsName}, redraw);
+        return;
+    }
+    const std::filesystem::path output = folder / outText;  // an absolute path replaces `folder`
+    if (mc::IsExportOutputInsideFolder(folder, output)) {
+        ShowMessage(console, kStrExportTitle, {kStrExportInsideFolder}, redraw);
+        return;
+    }
+
+    auto labelOf = [](const std::filesystem::path& p) { return gLabels.Get(p); };
+    std::vector<mc::ListingRow> rows = mc::GatherPanelRows(target.Entries(), folder, selectionOnly, labelOf);
+    bool capped = false;
+    if (subfolders) {
+        std::vector<std::wstring> dirs;
+        for (const mc::ListingRow& r : rows)
+            if (r.typeText == L"<DIR>") dirs.push_back(r.name);
+        for (const std::wstring& dir : dirs) {
+            mc::ListingGather sub =
+                mc::GatherSubtreeRows(folder / dir, labelOf, [&]() { return PeekEscapePressed(console); });
+            if (sub.cancelled) return;
+            if (sub.truncated) capped = true;
+            for (mc::ListingRow& r : sub.rows) {
+                r.name = dir + L"\\" + r.name;
+                rows.push_back(std::move(r));
+            }
+        }
+    }
+    if (rows.empty()) {
+        ShowMessage(console, kStrExportTitle, {kStrExportNothing}, redraw);
+        return;
+    }
+
+    if (mc::GetAttributesOrInvalid(output) != INVALID_FILE_ATTRIBUTES) {
+        std::vector<std::wstring> lines{L"\"" + output.wstring() + L"\" exists. Overwrite it?"};
+        if (ShowChoiceDialog(console, kStrExportTitle, lines, {{L'Y', kStrYesLabel}, {L'N', kStrNoLabel}}, redraw) != 0)
+            return;
+    }
+
+    const std::wstring text = mc::FormatListing(rows, asText ? mc::ListingFormat::Text : mc::ListingFormat::Csv);
+    if (!mc::WriteUtf8TextFileAtomic(output, text, /*withBom=*/!asText)) {
+        logger.Log(LogLevel::Error, L"Export listing: could not write \"" + output.wstring() + L"\"");
+        ShowMessage(console, kStrExportTitle, {kStrExportCannotWrite, output.wstring()}, redraw);
+        return;
+    }
+    logger.Log(LogLevel::Info,
+               L"Export listing: " + std::to_wstring(rows.size()) + L" rows to \"" + output.wstring() + L"\"");
+    std::vector<std::wstring> done{L"Exported " + std::to_wstring(rows.size()) + L" row(s) to:", output.wstring()};
+    if (capped) done.push_back(kStrExportCapped);
+    ShowMessage(console, kStrExportTitle, done, redraw);
+}
+
+void DoFindEmptyFolders(Console& console, Panel& left, Panel& right, bool leftActive, Logger& logger) {
+    Panel& target = leftActive ? left : right;
+    auto redraw = [&]() { DrawFrame(console, left, right, leftActive); };
+    if (target.Content() != nullptr || target.InProvider()) {
+        ShowMessage(console, kStrEmptyFoldersTitle, {kStrEmptyFoldersLocalOnly}, redraw);
+        return;
+    }
+
+    // Remembered for the session only.
+    struct EmptyState {
+        bool includeHidden = false;
+        bool chains = true;
+        bool junk = true;
+    };
+    static EmptyState state;
+    std::vector<mc::FormField> fields(3);
+    fields[0].kind = mc::FormFieldKind::Checkbox;
+    fields[0].label = L"Include hidden and system folders";
+    fields[0].boolValue = state.includeHidden;
+    fields[1].kind = mc::FormFieldKind::Checkbox;
+    fields[1].label = L"Folders holding only empty folders count as empty";
+    fields[1].boolValue = state.chains;
+    fields[2].kind = mc::FormFieldKind::Checkbox;
+    fields[2].label = L"Ignore Thumbs.db and desktop.ini";
+    fields[2].boolValue = state.junk;
+    if (!mc::ShowFormDialog(console, kStrEmptyFoldersTitle, fields, redraw)) return;
+    state = {fields[0].boolValue, fields[1].boolValue, fields[2].boolValue};
+
+    mc::EmptyFolderOptions options;
+    options.includeHidden = state.includeHidden;
+    options.chainsCountAsEmpty = state.chains;
+    options.ignoreJunkFiles = state.junk;
+
+    const std::filesystem::path root = target.Path();
+    console.Clear(kAttrNormal);
+    console.PutText(0, 0, PadOrTrim(FormatEmptyFoldersScanning(root.wstring()), console.Width()), kAttrHeaderActive);
+    console.Present();
+    auto lastProgress = std::chrono::steady_clock::time_point{};
+    auto onProgress = [&](const std::filesystem::path& current) {
+        auto now = std::chrono::steady_clock::now();
+        if (now - lastProgress < std::chrono::milliseconds(100)) return;
+        lastProgress = now;
+        console.PutText(0, 0, PadOrTrim(FormatEmptyFoldersScanning(current.wstring()), console.Width()), kAttrHeaderActive);
+        console.Present();
+    };
+    mc::EmptyFoldersOutcome outcome = mc::FindEmptyFolders(
+        root, options, [&]() { return PeekEscapePressed(console); }, onProgress);
+
+    if (outcome.folders.empty()) {
+        std::vector<std::wstring> lines{outcome.cancelled ? kStrSearchCancelled : kStrEmptyFoldersNone};
+        if (outcome.unreadable > 0) lines.push_back(FormatEmptyFoldersUnreadable(outcome.unreadable));
+        ShowMessage(console, kStrEmptyFoldersTitle, lines, redraw);
+        return;
+    }
+
+    // Deletes `victims` (full paths) to the Recycle Bin after confirmation. Returns true if the
+    // confirmed deletion ran (so the list is refreshed from disk), false if declined or refused.
+    auto deleteFolders = [&](const std::vector<std::filesystem::path>& victims) -> bool {
+        int sure = ShowChoiceDialog(console, kStrEmptyFoldersTitle, {FormatEmptyFoldersDeleteQuestion(victims.size())},
+                                    {{L'Y', kStrYesLabel}, {L'N', kStrNoLabel}}, redraw);
+        if (sure != 0) return false;
+        if (RefuseIfBusyWithJob(console, left, right, leftActive, victims)) return false;  // FOP-014
+
+        // Re-check each folder right now: one that gained a file since the scan keeps it.
+        std::vector<std::filesystem::path> verified;
+        size_t skipped = 0;
+        for (const auto& v : victims) {
+            if (mc::IsFolderEmptyNow(v, options)) verified.push_back(v);
+            else ++skipped;
+        }
+
+        ProgressUi ui{console, left, right, leftActive, kStrVerbDeleting};
+        auto onItemStart = [&](const std::wstring& n, int done, int total) { return ui.OnItemStart(n, done, total); };
+        auto cancelPoll = [&]() { return ui.PollCancel(); };
+        auto onError = [&](const std::wstring& n, const std::wstring& msg, DWORD win32Error) {
+            return AskFileError(console, left, right, leftActive, n, msg, win32Error);
+        };
+        OperationOutcome total;
+        // DeleteItems works on one folder's items at a time: group by parent.
+        std::vector<std::pair<std::filesystem::path, std::vector<std::wstring>>> groups;
+        for (const auto& v : verified) {
+            const std::filesystem::path parent = v.parent_path();
+            auto it = std::find_if(groups.begin(), groups.end(), [&](const auto& g) { return g.first == parent; });
+            if (it == groups.end()) groups.push_back({parent, {v.filename().wstring()}});
+            else it->second.push_back(v.filename().wstring());
+        }
+        for (const auto& group : groups) {
+            if (total.cancelled) break;
+            ui.primaryPath = group.first.wstring();
+            OperationOutcome o = DeleteItems(group.first, group.second, /*permanent=*/false, onItemStart, cancelPoll, onError);
+            LabelsAfterMoveOrDelete(group.first, group.second, nullptr);  // LIST-009
+            total.succeeded += o.succeeded;
+            total.skipped += o.skipped;
+            total.cancelled = total.cancelled || o.cancelled;
+            for (auto& f : o.failed) total.failed.push_back({(group.first / f.first).wstring(), f.second});
+        }
+        if (skipped > 0) {
+            logger.Log(LogLevel::Warning, L"Find empty folders: " + std::to_wstring(skipped) +
+                                              L" folder(s) skipped, no longer empty");
+        }
+        target.Refresh();
+        SyncOtherPanelIfSamePath(target, leftActive ? right : left);
+        ReportOutcome(console, left, right, leftActive, kStrVerbDelete, total, logger);
+        if (skipped > 0) ShowMessage(console, kStrEmptyFoldersTitle, {FormatEmptyFoldersSkipped(skipped)}, redraw);
+        return true;
+    };
+
+    int focus = 0;
+    for (;;) {
+        std::vector<std::wstring> rows(outcome.folders.size());
+        std::transform(outcome.folders.begin(), outcome.folders.end(), rows.begin(), [&](const mc::EmptyFolder& f) {
+            std::wstring rel = f.path.lexically_relative(root).wstring();
+            if (rel.empty()) rel = f.path.wstring();
+            return FormatEmptyFolderRow(rel, f.emptyChildren);
+        });
+        focus = std::clamp(focus, 0, static_cast<int>(rows.size()) - 1);
+        auto choice = mc::ShowListChoiceWithKeys(console, FormatEmptyFoldersHeader(rows.size(), outcome.truncated, outcome.unreadable),
+                                                 rows, redraw, focus, {VK_DELETE, 'A'}, kStrEmptyFoldersHint);
+        if (choice.index < 0) return;
+        focus = choice.index;
+
+        std::vector<std::filesystem::path> victims;
+        if (choice.key == VK_DELETE) victims.push_back(outcome.folders[static_cast<size_t>(choice.index)].path);
+        else if (choice.key == 'A') for (const auto& f : outcome.folders) victims.push_back(f.path);
+        else {
+            target.NavigateTo(outcome.folders[static_cast<size_t>(choice.index)].path);  // Enter
+            return;
+        }
+        if (!deleteFolders(victims)) continue;
+        // Drop whatever is gone from the list; anything that stayed (skipped, failed) remains listed.
+        outcome.folders.erase(std::remove_if(outcome.folders.begin(), outcome.folders.end(),
+                                             [](const mc::EmptyFolder& f) {
+                                                 std::error_code ec;
+                                                 return !std::filesystem::exists(f.path, ec);
+                                             }),
+                              outcome.folders.end());
+        if (outcome.folders.empty()) return;
+    }
+}
+
 void DoDirectoryHotlist(Console& console, Panel& left, Panel& right, bool leftActive, Logger& logger) {
     Panel& target = leftActive ? left : right;
     auto redraw = [&]() { DrawFrame(console, left, right, leftActive); };
@@ -3605,6 +5134,8 @@ void DoDirectoryHotlist(Console& console, Panel& left, Panel& right, bool leftAc
         bool onFavorite = choice.index < addIndex;
 
         if (choice.key == VK_RETURN && !onFavorite) {
+            // EXT-002: the hotlist holds local folders only (NAV-008's rule).
+            if (RefuseInsideProvider(console, left, right, leftActive, target, kStrHotlistTitle)) continue;
             int existing = mc::FindFavoriteByPath(favorites, target.Path());
             if (existing >= 0) {
                 ShowMessage(console, kStrHotlistTitle,
@@ -3792,6 +5323,156 @@ void DoAssignFileToApp(Console& console, Panel& left, Panel& right, bool leftAct
     }
 }
 
+// EXT-002 (D2): F5/F6/Shift+F5/drag-and-drop whenever either side is a
+// provider. `copyAsName` (Shift+F5) copies the single item under that name.
+void PerformProviderCopyOrMove(Console& console, Panel& left, Panel& right, bool leftActive, const Panel& source,
+                               const std::vector<std::wstring>& items, mc::IFileProvider& destProvider,
+                               const std::wstring& destDir, bool isMove, Logger& logger,
+                               const std::wstring& copyAsName = L"") {
+    auto redraw = [&]() { DrawFrame(console, left, right, leftActive); };
+    std::wstring verb = isMove ? kStrVerbMove : kStrVerbCopy;
+    mc::IFileProvider& sourceProvider = ProviderOf(source);
+    std::wstring sourceDir = LocationOf(source);
+
+    if (!(destProvider.Capabilities() & mc::CapWrite)) {
+        ShowMessage(console, FormatCannotVerbTitle(verb), {destProvider.DisplayRoot() + destDir, kStrProviderCannotWrite},
+                    redraw);
+        return;
+    }
+    if (isMove && !(sourceProvider.Capabilities() & mc::CapDelete)) {
+        ShowMessage(console, FormatCannotVerbTitle(verb), {source.LocationText(), kStrProviderCannotWrite}, redraw);
+        return;
+    }
+
+    // FOP-014: only the local side(s) can collide with a background job.
+    std::vector<std::filesystem::path> touched;
+    if (!source.InProvider()) touched = ItemPaths(source.Path(), items);
+    if (destProvider.IsLocal()) touched.push_back(std::filesystem::path(destDir));
+    if (!touched.empty() && RefuseIfBusyWithJob(console, left, right, leftActive, touched)) return;
+
+    mc::ProviderEntry destEntry;
+    std::wstring err;
+    mc::ProviderStatus st = destProvider.Stat(destDir, destEntry, {}, err);
+    if (st == mc::ProviderStatus::NotFound) {
+        int choice = ShowChoiceDialog(console, kStrCreateDestinationTitle, {L"\"" + destDir + kStrDoesNotExistSuffix},
+                                      {{L'Y', kStrYesCreateItLabel}, {L'N', kStrNoCancelLabel}}, redraw);
+        if (choice != 0) return;
+        if (destProvider.MakeDirectory(destDir, {}, err) != mc::ProviderStatus::Ok) {
+            ShowMessage(console, kStrCannotCreateDestinationTitle, {destDir, err}, redraw);
+            return;
+        }
+    } else if (st == mc::ProviderStatus::Ok && !destEntry.isDirectory) {
+        ShowMessage(console, FormatCannotVerbTitle(verb), {destDir, kStrIsNotADirectory}, redraw);
+        return;
+    } else if (st != mc::ProviderStatus::Ok && !destProvider.IsRoot(destDir)) {
+        ShowMessage(console, FormatCannotVerbTitle(verb), {destProvider.DisplayRoot() + destDir, err}, redraw);
+        return;
+    }
+
+    ProgressUi ui{console, left, right, leftActive, isMove ? kStrVerbMoving : kStrVerbCopying};
+    ui.primaryPath = source.LocationText();
+    ui.destPath = destProvider.DisplayRoot() + destDir;
+    mc::ProviderOpHandlers handlers = MakeProviderHandlers(console, left, right, leftActive, ui, logger);
+    OperationOutcome outcome =
+        isMove ? mc::ProviderMoveItems(sourceProvider, sourceDir, items, destProvider, destDir, handlers)
+        : !copyAsName.empty()
+            ? mc::ProviderCopyItemAs(sourceProvider, sourceDir, items.front(), destProvider, destDir, copyAsName, handlers)
+            : mc::ProviderCopyItems(sourceProvider, sourceDir, items, destProvider, destDir, handlers);
+    left.Refresh();
+    right.Refresh();
+    ReportOutcome(console, left, right, leftActive, verb, outcome, logger);
+}
+
+// EXT-002: a provider file opened for reading (F3, Enter, Shift+Enter,
+// Shift+F3) is fetched into this session's private temporary folder first,
+// so file actions, viewer plugins and the built-in viewer all get a real
+// local path. Copies are read-only snapshots; the whole folder is removed at
+// exit (not right after viewing: an external viewer may still be reading).
+std::filesystem::path ProviderTempRoot() {
+    wchar_t tempRoot[MAX_PATH];
+    GetTempPathW(MAX_PATH, tempRoot);
+    return std::filesystem::path(tempRoot) / L"MyCommander" / (L"providers-" + std::to_wstring(GetCurrentProcessId()));
+}
+
+std::optional<std::filesystem::path> FetchProviderFile(Console& console, const Panel& left, const Panel& right,
+                                                       bool leftActive, mc::IFileProvider& provider,
+                                                       const std::wstring& sourceDir, const std::wstring& name,
+                                                       Logger& logger) {
+    auto redraw = [&]() { DrawFrame(console, left, right, leftActive); };
+    static unsigned fetchCounter = 0;
+    std::filesystem::path dir =
+        ProviderTempRoot() / (std::to_wstring(GetTickCount64()) + L"-" + std::to_wstring(++fetchCounter));
+    std::error_code ec;
+    std::filesystem::create_directories(dir, ec);
+    ProgressUi ui{console, left, right, leftActive, kStrProviderFetching};
+    ui.primaryPath = provider.DisplayRoot() + sourceDir;
+    mc::ProviderOpHandlers handlers = MakeProviderHandlers(console, left, right, leftActive, ui, logger);
+    OperationOutcome outcome = mc::ProviderCopyItems(provider, sourceDir, {name}, gLocalProvider, dir.wstring(), handlers);
+    std::filesystem::path local = dir / name;
+    if (outcome.succeeded == 1) {
+        SetFileAttributesW(local.c_str(), FILE_ATTRIBUTE_READONLY);
+        return local;
+    }
+    if (!outcome.cancelled) {
+        std::vector<std::wstring> lines{kStrProviderViewFailed};
+        for (const auto& f : outcome.failed) lines.push_back(f.second);
+        ShowMessage(console, kStrProviderViewTitle, lines, redraw);
+    }
+    std::filesystem::remove_all(dir, ec);
+    return std::nullopt;
+}
+
+std::optional<std::filesystem::path> FetchProviderCursorFile(Console& console, const Panel& left, const Panel& right,
+                                                             bool leftActive, Logger& logger) {
+    const Panel& target = leftActive ? left : right;
+    const auto& entries = target.Entries();
+    int cursor = target.Cursor();
+    if (!target.InProvider() || cursor < 0 || cursor >= static_cast<int>(entries.size())) return std::nullopt;
+    const Entry& entry = entries[static_cast<size_t>(cursor)];
+    if (entry.isDirectory || entry.name == L"..") return std::nullopt;
+    return FetchProviderFile(console, left, right, leftActive, *target.Provider(), target.ProviderPath(), entry.name,
+                             logger);
+}
+
+bool HasPendingProviderChanges(const Panel& left, const Panel& right) {
+    return (left.InProvider() && left.Provider()->HasPendingChanges()) ||
+           (right.InProvider() && right.Provider()->HasPendingChanges());
+}
+
+// EXT-002: before quitting, a panel holding unsaved provider changes (an
+// edited archive) leaves through its own Save / Don't save / Cancel prompt.
+// False when the user cancelled: the app keeps running.
+bool ResolveProviderChangesBeforeQuit(Panel& left, Panel& right) {
+    for (Panel* panel : {&left, &right}) {
+        if (panel->InProvider() && panel->Provider()->HasPendingChanges() && !panel->CloseProvider(false)) return false;
+    }
+    return true;
+}
+
+void RemoveProviderTempRoot() {
+    std::filesystem::path root = ProviderTempRoot();
+    std::error_code ec;
+    for (auto it = std::filesystem::recursive_directory_iterator(root, ec); !ec && it != std::filesystem::recursive_directory_iterator(); it.increment(ec))
+        SetFileAttributesW(it->path().c_str(), FILE_ATTRIBUTE_NORMAL);
+    std::filesystem::remove_all(root, ec);
+}
+
+// EXT-002 phase 2: with MC_DEBUG_MEMORY_PROVIDER=1, typing "mem://" in the
+// command line opens a small in-memory sample tree in the active panel.
+bool TryOpenDebugMemoryProvider(Panel& target, const std::wstring& text) {
+    if (text != L"mem://") return false;
+    wchar_t flag[8] = {};
+    if (GetEnvironmentVariableW(L"MC_DEBUG_MEMORY_PROVIDER", flag, 8) == 0 || flag[0] != L'1') return false;
+    auto tree = std::make_shared<mc::MemoryProvider>(L"mem://debug");
+    tree->AddFile(L"/readme.txt", "In-memory sample provider (EXT-002 debug switch).\r\n", 133000000000000000ull);
+    tree->AddFile(L"/docs/notes.md", "# Notes\r\n", 133100000000000000ull);
+    tree->AddFile(L"/docs/big.bin", std::string(3 * 1024 * 1024, 'x'), 133200000000000000ull);
+    tree->AddDirectory(L"/empty");
+    tree->AddLink(L"/docs-link", L"/docs", true);
+    target.OpenProvider(tree, L"/");
+    return true;
+}
+
 // EXT-001/CON-004/IS-0003: the actual copy/move engine call, shared by
 // DoCopyOrMove (F5/F6, which first prompts for `destDir` via ShowTextPrompt)
 // and IS-0003's drag-and-drop drop handler (which already knows `destDir` â€”
@@ -3804,14 +5485,14 @@ void DoAssignFileToApp(Console& console, Panel& left, Panel& right, bool leftAct
 // full path the single item is copied to under its own new name (Shift+F5);
 // `destDir` is then that target's parent directory, so the same "create the
 // missing destination folder?" check applies to it unchanged.
-void PerformCopyOrMove(Console& console, Panel& left, Panel& right, bool leftActive, const Panel& source,
+void PerformCopyOrMove(Console& console, Panel& left, Panel& right, bool leftActive, const std::filesystem::path& sourceDir,
                        const std::vector<std::wstring>& items, const std::filesystem::path& destDir, bool isMove,
                        Logger& logger, const std::optional<std::filesystem::path>& copyAsTarget = std::nullopt) {
     auto redraw = [&]() { DrawFrame(console, left, right, leftActive); };
     std::wstring verb = isMove ? kStrVerbMove : kStrVerbCopy;
 
     // FOP-014: F5/F6, Shift+F5 and drag-and-drop all come through here.
-    std::vector<std::filesystem::path> touched = ItemPaths(source.Path(), items);
+    std::vector<std::filesystem::path> touched = ItemPaths(sourceDir, items);
     touched.push_back(copyAsTarget ? *copyAsTarget : destDir);
     if (RefuseIfBusyWithJob(console, left, right, leftActive, touched)) return;
 
@@ -3831,8 +5512,15 @@ void PerformCopyOrMove(Console& console, Panel& left, Panel& right, bool leftAct
         return;
     }
 
+    // FOP-022: what already sits at each destination, to tell afterwards what the operation created.
+    const bool singleTarget = copyAsTarget.has_value();
+    std::vector<mc::PathFingerprint> destBefore;
+    for (const auto& name : items)
+        destBefore.push_back(mc::FingerprintOf(singleTarget ? *copyAsTarget : destDir / name));
+    bool elevatedAny = false;
+
     ProgressUi ui{console, left, right, leftActive, isMove ? kStrVerbMoving : kStrVerbCopying};
-    ui.primaryPath = source.Path().wstring();
+    ui.primaryPath = sourceDir.wstring();
     ui.destPath = destDir.wstring();
     auto onConflict = [&](const std::filesystem::path& d) { return AskConflict(console, left, right, leftActive, d); };
     auto onItemStart = [&](const std::wstring& n, int done, int total) { return ui.OnItemStart(n, done, total); };
@@ -3845,6 +5533,7 @@ void PerformCopyOrMove(Console& console, Panel& left, Panel& right, bool leftAct
     // an access-denied failure (AskFileError above) â€” a UAC prompt for this
     // one item, never anything broader.
     auto onElevateCopy = [&](const std::filesystem::path& src, const std::filesystem::path& dst, std::wstring& err) {
+        elevatedAny = true;
         logger.Log(LogLevel::Warning, L"Elevating copy: \"" + src.wstring() + L"\" -> \"" + dst.wstring() + L"\"");
         DWORD result = RunElevated(ElevatedRequest{ElevatedAction::Copy, src, dst});
         if (result == ERROR_SUCCESS) return true;
@@ -3854,6 +5543,7 @@ void PerformCopyOrMove(Console& console, Panel& left, Panel& right, bool leftAct
     };
     auto onElevateMove = [&](const std::filesystem::path& src, const std::filesystem::path& dst, bool overwrite,
                              std::wstring& err) {
+        elevatedAny = true;
         logger.Log(LogLevel::Warning, L"Elevating move: \"" + src.wstring() + L"\" -> \"" + dst.wstring() + L"\"");
         ElevatedRequest req{ElevatedAction::Move, src, dst};
         req.overwrite = overwrite;
@@ -3865,14 +5555,41 @@ void PerformCopyOrMove(Console& console, Panel& left, Panel& right, bool leftAct
     };
 
     OperationOutcome outcome =
-        isMove ? MoveItems(source.Path(), items, destDir, onConflict, onItemStart, cancelPoll, onError, onByteProgress,
+        isMove ? MoveItems(sourceDir, items, destDir, onConflict, onItemStart, cancelPoll, onError, onByteProgress,
                           onElevateMove)
         : copyAsTarget
-            ? mc::CopyItemAs(source.Path(), items.front(), *copyAsTarget, onConflict, onItemStart, cancelPoll,
+            ? mc::CopyItemAs(sourceDir, items.front(), *copyAsTarget, onConflict, onItemStart, cancelPoll,
                              onError, onByteProgress, onElevateCopy)
-            : CopyItems(source.Path(), items, destDir, onConflict, onItemStart, cancelPoll, onError, onByteProgress,
+            : CopyItems(sourceDir, items, destDir, onConflict, onItemStart, cancelPoll, onError, onByteProgress,
                         onElevateCopy);
 
+    if (isMove) LabelsAfterMoveOrDelete(sourceDir, items, &destDir);  // LIST-009
+    {  // FOP-022: record exactly what this operation created; anything murkier clears the journal
+        std::vector<mc::UndoItem> done;
+        bool murky = elevatedAny;
+        for (size_t i = 0; i < items.size(); ++i) {
+            const std::filesystem::path src = sourceDir / items[i];
+            const std::filesystem::path dst = singleTarget ? *copyAsTarget : destDir / items[i];
+            mc::PathFingerprint now = mc::FingerprintOf(dst);
+            if (destBefore[i].exists) {
+                if (!(now == destBefore[i])) murky = true;  // an existing item was replaced or merged into
+                continue;
+            }
+            if (!now.exists) continue;  // skipped or failed
+            if (isMove) {
+                if (mc::FingerprintOf(src).exists) {  // cross-volume move interrupted halfway
+                    murky = true;
+                    continue;
+                }
+                done.push_back(mc::MakeMovedItem(src, dst));
+            } else {
+                done.push_back(mc::MakeCreatedItem(src, dst));
+            }
+        }
+        if (murky) UndoClear();
+        else if (isMove) UndoRecord(mc::UndoKind::Move, L"move " + UndoCountText(done.size(), L"item"), std::move(done));
+        else UndoRecord(mc::UndoKind::Copy, L"copy " + UndoCountText(done.size(), L"item"), std::move(done));
+    }
     left.Refresh();
     right.Refresh();
     ReportOutcome(console, left, right, leftActive, verb, outcome, logger);
@@ -3888,6 +5605,22 @@ void PerformCopyOrMove(Console& console, Panel& left, Panel& right, bool leftAct
 void ActivateCursorEntry(Console& console, Panel& left, Panel& right, bool leftActive, const Config& config,
                          Logger& logger, PluginManager& pluginManager, std::vector<PendingEdit>& pendingEdits) {
     Panel& target = leftActive ? left : right;
+    // EXT-002: a provider file has no local path to edit or execute in place,
+    // so Enter opens it (Open setting) or views it (every other setting).
+    if (target.InProvider()) {
+        int cursor = target.Cursor();
+        const auto& entries = target.Entries();
+        bool onFile = cursor >= 0 && cursor < static_cast<int>(entries.size()) &&
+                      !entries[static_cast<size_t>(cursor)].isDirectory;
+        if (!onFile) {
+            target.EnterSelected();
+        } else if (config.enterFileAction == EnterFileAction::Open) {
+            DoOpenAction(console, left, right, leftActive, logger);
+        } else {
+            DoViewAction(console, left, right, leftActive, logger);
+        }
+        return;
+    }
     if (auto filePath = CursorFilePath(target)) {
         if (pluginManager.TryEnterAsArchive(leftActive ? kMcPanelLeft : kMcPanelRight, *filePath)) return;
         switch (config.enterFileAction) {
@@ -3970,6 +5703,528 @@ void SimulateKeyPress(Console& console, const HintAction& action) {
     WriteConsoleInputW(console.InputHandle(), records, 2, &written);
 }
 
+// FOP-020: Used Disk Area (File menu / Alt+Shift+Enter) -- a recursive size
+// scan of the selection, or the cursor entry if nothing is selected.
+void DoDiskUsage(Console& console, Panel& left, Panel& right, bool leftActive) {
+    Panel& target = leftActive ? left : right;
+    if (RefuseInsideProvider(console, left, right, leftActive, target, kStrProviderUnavailableTitle)) return;
+    auto redraw = [&]() { DrawFrame(console, left, right, leftActive); };
+    std::vector<std::wstring> items = target.SelectionOrCursor();
+    if (items.empty()) return;
+
+    struct ItemUsage {
+        std::wstring name;
+        mc::DiskUsageResult result;
+    };
+    std::vector<ItemUsage> perItem;
+    bool anyCancelled = false;
+    for (const auto& name : items) {
+        std::filesystem::path path = target.Path() / name;
+        auto cancelPoll = [&]() { return PeekEscapePressed(console); };
+        auto lastDraw = std::chrono::steady_clock::time_point{};
+        auto onProgress = [&](const mc::DiskUsageProgress& p) {
+            auto now = std::chrono::steady_clock::now();
+            if (now - lastDraw < std::chrono::milliseconds(100)) return;
+            lastDraw = now;
+            console.PutText(0, 0,
+                            PadOrTrim(L"Calculating \"" + name + L"\"... " + std::to_wstring(p.filesSoFar) +
+                                          L" files, " + FormatHumanBytes(static_cast<double>(p.bytesSoFar)) +
+                                          L"  Esc to cancel",
+                                      console.Width()),
+                            kAttrHeaderActive);
+            console.Present();
+        };
+        console.Clear(kAttrNormal);
+        console.PutText(0, 0, PadOrTrim(L"Calculating \"" + name + L"\"...  Esc to cancel", console.Width()),
+                        kAttrHeaderActive);
+        console.Present();
+        mc::DiskUsageResult result = mc::SumTree(path, cancelPoll, onProgress);
+        bool cancelled = result.cancelled;
+        perItem.push_back({name, std::move(result)});
+        if (cancelled) {
+            anyCancelled = true;
+            break;
+        }
+    }
+
+    auto summaryLines = [](const mc::DiskUsageResult& r) {
+        std::vector<std::wstring> lines = {
+            L"Size: " + FormatHumanBytes(static_cast<double>(r.bytes)) + L" (" + std::to_wstring(r.bytes) +
+                L" bytes)",
+            L"On disk: " + FormatHumanBytes(static_cast<double>(r.allocated)),
+            std::to_wstring(r.files) + L" file(s), " + std::to_wstring(r.folders) + L" folder(s)",
+        };
+        if (r.unreadableFolders > 0)
+            lines.push_back(std::to_wstring(r.unreadableFolders) + L" folder(s) could not be read");
+        if (r.cancelled) lines.push_back(L"(cancelled -- partial result)");
+        return lines;
+    };
+
+    if (perItem.size() == 1) {
+        ShowMessage(console, L"Used Disk Area", summaryLines(perItem[0].result), redraw);
+        return;
+    }
+
+    mc::DiskUsageResult total;
+    for (const auto& it : perItem) {
+        total.bytes += it.result.bytes;
+        total.allocated += it.result.allocated;
+        total.files += it.result.files;
+        total.folders += it.result.folders;
+        total.unreadableFolders += it.result.unreadableFolders;
+    }
+    total.cancelled = anyCancelled;
+    std::sort(perItem.begin(), perItem.end(),
+             [](const ItemUsage& a, const ItemUsage& b) { return a.result.bytes > b.result.bytes; });
+
+    std::vector<std::wstring> rows;
+    for (const auto& it : perItem) {
+        rows.push_back(PadOrTrim(it.name, 40) + L"  " +
+                       PadOrTrim(FormatHumanBytes(static_cast<double>(it.result.bytes)), 12) + L"  " +
+                       std::to_wstring(it.result.files) + L" file(s)");
+    }
+    std::wstring title = L"Used Disk Area -- " + FormatHumanBytes(static_cast<double>(total.bytes)) + L" total" +
+                         (total.cancelled ? L" (cancelled)" : L"");
+    int index = ShowListChoice(console, title, rows, redraw);
+    if (index < 0 || index >= static_cast<int>(perItem.size())) return;
+    // Enter: select that entry in the panel, the same NavigateTo(path, name)
+    // mechanism IS-0001/search results already use to land a cursor on a
+    // specific name once its listing is ready.
+    target.NavigateTo(target.Path(), perItem[static_cast<size_t>(index)].name);
+    while (target.IsLoading()) target.PumpRefresh(4096);
+}
+
+// FOP-021: Generate Check Code (File menu, menu-only) -- hashes the
+// selection's files (folders are skipped) with CNG, writing GNU/Total
+// Commander-format .md5/.sha1/.sha256/.sha512 files.
+void DoGenerateCheckCodeForSelection(Console& console, Panel& left, Panel& right, bool leftActive) {
+    Panel& target = leftActive ? left : right;
+    Panel& other = leftActive ? right : left;
+    auto redraw = [&]() { DrawFrame(console, left, right, leftActive); };
+    std::vector<std::wstring> items = target.SelectionOrCursor();
+    if (items.empty()) return;
+
+    struct CheckCodeState {
+        int algorithm = 2;  // MD5/SHA-1/SHA-256/SHA-512 -- SHA-256 default
+        int mode = 0;       // 0 = one file for all, 1 = one file per file
+        int dest = 0;       // 0 = this folder, 1 = other panel's folder (mode 0 only)
+    };
+    static CheckCodeState state;
+    std::vector<mc::FormField> fields(3);
+    fields[0].kind = mc::FormFieldKind::Choice;
+    fields[0].label = L"Algorithm";
+    fields[0].choices = {L"MD5", L"SHA-1", L"SHA-256", L"SHA-512"};
+    fields[0].choiceIndex = state.algorithm;
+    fields[1].kind = mc::FormFieldKind::Choice;
+    fields[1].label = L"Output";
+    fields[1].choices = {L"One file for all", L"One file per file"};
+    fields[1].choiceIndex = state.mode;
+    fields[2].kind = mc::FormFieldKind::Choice;
+    fields[2].label = L"Save in (one-file mode)";
+    fields[2].choices = {L"This folder", L"Other panel's folder"};
+    fields[2].choiceIndex = state.dest;
+    if (!mc::ShowFormDialog(console, L"Generate Check Code", fields, redraw)) return;
+    state = {fields[0].choiceIndex, fields[1].choiceIndex, fields[2].choiceIndex};
+
+    mc::HashAlgorithm algorithm = static_cast<mc::HashAlgorithm>(state.algorithm);
+    std::filesystem::path destFolder = state.dest == 1 ? other.Path() : target.Path();
+
+    const auto& entries = target.Entries();
+    std::vector<std::wstring> files;
+    uint64_t unreadableFolders = 0;
+    bool listingCancelled = false;
+    for (const auto& name : items) {
+        auto it = std::find_if(entries.begin(), entries.end(), [&](const Entry& e) { return e.name == name; });
+        if (it != entries.end() && it->isDirectory) {
+            // IS-0020: a folder in the selection is walked recursively
+            // instead of being skipped -- SEC-006-safe (CheckSum.cpp's
+            // EnumerateFilesRecursively never descends into a reparse
+            // point), same shape as DiskUsage.cpp's own walk.
+            auto cancelPoll = [&]() { return PeekEscapePressed(console); };
+            mc::FileListResult listed = mc::EnumerateFilesRecursively(target.Path() / name, cancelPoll);
+            for (const auto& rel : listed.relativePaths) files.push_back(name + L"\\" + rel);
+            unreadableFolders += listed.unreadableFolders;
+            if (listed.cancelled) {
+                listingCancelled = true;
+                break;
+            }
+            continue;
+        }
+        files.push_back(name);
+    }
+    if (listingCancelled) {
+        ShowMessage(console, L"Generate Check Code", {L"Cancelled."}, redraw);
+        return;
+    }
+    if (files.empty()) {
+        ShowMessage(console, L"Generate Check Code", {L"No files in the selection."}, redraw);
+        return;
+    }
+
+    bool cancelled = false;
+    std::wstring aggregate;
+    size_t doneCount = 0;
+    for (const auto& name : files) {
+        std::filesystem::path path = target.Path() / name;
+        auto cancelPoll = [&]() { return PeekEscapePressed(console); };
+        console.Clear(kAttrNormal);
+        console.PutText(0, 0,
+                        PadOrTrim(L"Hashing \"" + name + L"\"  (" + std::to_wstring(doneCount + 1) + L"/" +
+                                      std::to_wstring(files.size()) + L")  Esc to cancel",
+                                  console.Width()),
+                        kAttrHeaderActive);
+        console.Present();
+        std::wstring err;
+        auto hash = mc::HashFile(path, algorithm, err, cancelPoll);
+        if (!hash) {
+            cancelled = true;
+            break;
+        }
+        ++doneCount;
+        std::wstring line = mc::FormatSumLine(*hash, name);
+        if (state.mode == 0) {
+            aggregate += line + L"\r\n";
+        } else {
+            std::filesystem::path sumPath = target.Path() / (name + L"." + mc::HashAlgorithmName(algorithm));
+            mc::WriteUtf8TextFileAtomic(sumPath, line + L"\r\n");
+        }
+    }
+    if (!cancelled && state.mode == 0 && !aggregate.empty()) {
+        std::wstring baseName = items.size() == 1 ? std::filesystem::path(items[0]).stem().wstring()
+                                                   : target.Path().filename().wstring();
+        if (baseName.empty()) baseName = L"checksum";
+        std::filesystem::path sumPath = destFolder / (baseName + L"." + mc::HashAlgorithmName(algorithm));
+        mc::WriteUtf8TextFileAtomic(sumPath, aggregate);
+    }
+    target.Refresh();
+    other.Refresh();
+
+    std::vector<std::wstring> resultLines = {std::to_wstring(doneCount) + L" of " + std::to_wstring(files.size()) +
+                                             L" file(s) hashed."};
+    if (unreadableFolders > 0)
+        resultLines.push_back(std::to_wstring(unreadableFolders) + L" folder(s) could not be read.");
+    if (cancelled) resultLines.push_back(L"(cancelled)");
+    ShowMessage(console, L"Generate Check Code", resultLines, redraw);
+}
+
+// FOP-021: Verify -- the cursor is on a .md5/.sha1/.sha256/.sha512 file;
+// re-hashes every file it lists (relative to its own folder) and reports
+// OK/FAILED/MISSING per entry.
+void DoVerifyCheckSum(Console& console, Panel& left, Panel& right, bool leftActive) {
+    Panel& target = leftActive ? left : right;
+    auto redraw = [&]() { DrawFrame(console, left, right, leftActive); };
+    auto filePath = CursorFilePath(target);
+    if (!filePath) return;
+
+    std::wstring text = mc::ReadUtf8TextFile(*filePath);
+    auto entries = mc::ParseSumFile(text);
+    if (entries.empty()) {
+        ShowMessage(console, L"Verify Check Code", {L"No checksum entries found in this file."}, redraw);
+        return;
+    }
+    console.Clear(kAttrNormal);
+    console.PutText(0, 0, PadOrTrim(L"Verifying...  Esc to cancel", console.Width()), kAttrHeaderActive);
+    console.Present();
+    auto cancelPoll = [&]() { return PeekEscapePressed(console); };
+    mc::VerifyOutcome outcome = mc::VerifyPlan(filePath->parent_path(), entries, cancelPoll);
+
+    std::vector<std::wstring> rows;
+    for (const auto& r : outcome.results) {
+        const wchar_t* status = r.status == mc::VerifyStatus::Ok ? L"OK"
+                                : r.status == mc::VerifyStatus::Failed ? L"FAILED"
+                                                                       : L"MISSING";
+        rows.push_back(PadOrTrim(status, 8) + r.name);
+    }
+    std::wstring title = std::to_wstring(outcome.ok) + L" OK, " + std::to_wstring(outcome.failed) + L" FAILED, " +
+                         std::to_wstring(outcome.missing) + L" MISSING";
+    if (outcome.cancelled) title += L" (cancelled)";
+    ShowListChoice(console, title, rows, redraw);
+}
+
+// FOP-021: File > Generate Check Code dispatches to Verify when the cursor
+// is already on a recognized checksum file, else generates for the
+// selection -- "the same menu item offers Verify" (the plan's own wording).
+void DoGenerateCheckCode(Console& console, Panel& left, Panel& right, bool leftActive) {
+    Panel& target = leftActive ? left : right;
+    if (RefuseInsideProvider(console, left, right, leftActive, target, kStrProviderUnavailableTitle)) return;
+    if (auto filePath = CursorFilePath(target)) {
+        std::wstring ext = filePath->extension().wstring();
+        std::transform(ext.begin(), ext.end(), ext.begin(), [](wchar_t c) { return static_cast<wchar_t>(std::towlower(c)); });
+        if (ext == L".md5" || ext == L".sha1" || ext == L".sha256" || ext == L".sha512") {
+            DoVerifyCheckSum(console, left, right, leftActive);
+            return;
+        }
+    }
+    DoGenerateCheckCodeForSelection(console, left, right, leftActive);
+}
+
+// SEL-008: Copy Selected Names to Clipboard (Ctrl+Shift+C) -- names, full
+// paths, or full paths with size/date, CRLF-joined onto the clipboard.
+void DoCopySelectedNames(Console& console, Panel& left, Panel& right, bool leftActive) {
+    Panel& target = leftActive ? left : right;
+    auto redraw = [&]() { DrawFrame(console, left, right, leftActive); };
+    if (target.Content() != nullptr) {
+        ShowMessage(console, L"Copy Selected Names to Clipboard", {L"Not available for plugin panels."}, redraw);
+        return;
+    }
+    std::vector<std::wstring> items = target.SelectionOrCursor();
+    if (items.empty()) return;
+
+    int choice = ShowChoiceDialog(console, L"Copy Selected Names to Clipboard", {L"Choose what to copy:"},
+                                  {{L'N', L"Names"}, {L'F', L"Full paths"}, {L'D', L"Full paths + details"},
+                                   {L'C', kStrCancelLabel}},
+                                  redraw);
+    if (choice < 0 || choice > 2) return;
+
+    const auto& entries = target.Entries();
+    std::vector<mc::ClipboardFileDetail> details;
+    for (const auto& name : items) {
+        auto it = std::find_if(entries.begin(), entries.end(), [&](const Entry& e) { return e.name == name; });
+        mc::ClipboardFileDetail d;
+        d.name = name;
+        // EXT-002: inside a provider, "sftp://host/dir/name"-style.
+        d.fullPath = target.InProvider() ? std::filesystem::path(target.Provider()->DisplayRoot() + target.ItemLocation(name))
+                                         : target.Path() / name;
+        if (it != entries.end()) {
+            d.size = it->sizeBytes;
+            d.isDirectory = it->isDirectory;
+            d.modifiedText = FormatModifiedTime(it->lastWriteTimeUtc);
+        }
+        details.push_back(std::move(d));
+    }
+    mc::ClipboardNameFormat format = choice == 0 ? mc::ClipboardNameFormat::Names
+                                     : choice == 1 ? mc::ClipboardNameFormat::FullPaths
+                                                   : mc::ClipboardNameFormat::FullPathsWithDetails;
+    if (!mc::CopyTextToClipboard(mc::FormatNamesForClipboard(details, format))) {
+        ShowMessage(console, L"Copy Selected Names to Clipboard", {L"Could not access the clipboard."}, redraw);
+    }
+}
+
+// NAV-013: Disk Label (Commands menu, menu-only) -- shows/changes the active
+// panel's volume label. A fixed/system drive typically answers
+// ERROR_ACCESS_DENIED for an unelevated caller; offers Elevate & Retry
+// (SEC-003) the same way DoChangeAttributes' onElevateAttribute does.
+void DoDiskLabel(Console& console, Panel& left, Panel& right, bool leftActive, Logger& logger) {
+    Panel& target = leftActive ? left : right;
+    if (RefuseInsideProvider(console, left, right, leftActive, target, kStrProviderUnavailableTitle)) return;
+    auto redraw = [&]() { DrawFrame(console, left, right, leftActive); };
+    if (target.Content() != nullptr) return;  // no real volume behind a plugin/tree panel
+
+    std::filesystem::path root = mc::FindFilesystemRoot(target.Path());
+    auto newLabel = ShowTextPrompt(console, L"Disk Label", target.Volume().label, redraw);
+    if (!newLabel) return;
+
+    DWORD win32Error = 0;
+    bool ok = mc::SetVolumeLabelDirect(root, *newLabel, win32Error);
+    if (!ok && win32Error == ERROR_ACCESS_DENIED) {
+        int choice = ShowChoiceDialog(console, L"Disk Label", {L"Administrator rights are needed to relabel this drive."},
+                                      {{L'E', L"Elevate & retry"}, {L'C', kStrCancelLabel}}, redraw);
+        if (choice != 0) return;
+        logger.Log(LogLevel::Warning, L"Elevating disk label change: \"" + root.wstring() + L"\"");
+        ElevatedRequest request{ElevatedAction::SetVolumeLabel, root};
+        request.text = *newLabel;
+        DWORD result = RunElevated(request);
+        ok = (result == ERROR_SUCCESS);
+        win32Error = result;
+        if (!ok) logger.Log(LogLevel::Error, L"Elevated disk label change failed: \"" + root.wstring() + L"\": " +
+                                                 FormatWinError(win32Error));
+    }
+    if (!ok) {
+        ShowMessage(console, L"Disk Label", {FormatWinError(win32Error)}, redraw);
+        return;
+    }
+    target.Refresh();  // UI-003's volume line picks up the new label
+}
+
+// NAV-014: Network Connection (Network menu, menu-only) -- lists the
+// current connections (WNetOpenEnumW), offers mapping a new one or
+// disconnecting an existing one, and opens one in the active panel.
+void DoNetworkConnection(Console& console, Panel& left, Panel& right, bool leftActive, Logger& logger) {
+    Panel& target = leftActive ? left : right;
+    auto redraw = [&]() { DrawFrame(console, left, right, leftActive); };
+
+    for (;;) {
+        std::vector<mc::NetworkConnectionInfo> connections = mc::EnumerateNetworkConnections();
+        std::vector<std::wstring> rows;
+        for (const auto& c : connections) rows.push_back(mc::FormatConnectionRow(c));
+        rows.push_back(L"+ Map network drive");
+
+        mc::ListChoiceResult result = ShowListChoiceWithKeys(
+            console, L"Network Connection", rows, redraw, 0, {VK_DELETE},
+            L"[Enter] open/map  [Del] disconnect  [Esc] close");
+        if (result.index < 0) return;  // Esc or an empty list
+
+        if (result.index == static_cast<int>(connections.size())) {
+            // "+ Map network drive".
+            std::vector<std::wstring> letters;
+            DWORD driveMask = GetLogicalDrives();
+            for (wchar_t c = L'C'; c <= L'Z'; ++c) {
+                if ((driveMask & (1u << (c - L'A'))) == 0) letters.push_back(std::wstring(1, c) + L":");
+            }
+            if (letters.empty()) {
+                ShowMessage(console, L"Network Connection", {L"No free drive letters."}, redraw);
+                continue;
+            }
+            std::vector<mc::FormField> fields(5);
+            fields[0].kind = mc::FormFieldKind::Choice;
+            fields[0].label = L"Drive letter";
+            fields[0].choices = letters;
+            fields[1].kind = mc::FormFieldKind::Text;
+            fields[1].label = L"\\\\server\\share";
+            fields[2].kind = mc::FormFieldKind::Checkbox;
+            fields[2].label = L"Reconnect at sign-in";
+            fields[3].kind = mc::FormFieldKind::Text;
+            fields[3].label = L"User name (optional)";
+            fields[4].kind = mc::FormFieldKind::Text;
+            fields[4].label = L"Password (optional, not stored by MyCommander)";
+            fields[4].masked = true;
+            if (!mc::ShowFormDialog(console, L"Map Network Drive", fields, redraw)) continue;
+
+            if (!mc::IsValidUncPath(fields[1].text)) {
+                ShowMessage(console, L"Map Network Drive", {L"Not a valid \\\\server\\share path."}, redraw);
+                continue;
+            }
+            DWORD rc = mc::MapNetworkDrive(letters[static_cast<size_t>(fields[0].choiceIndex)], fields[1].text,
+                                           fields[2].boolValue, fields[3].text, fields[4].text);
+            if (rc != NO_ERROR) {
+                ShowMessage(console, L"Map Network Drive", {FormatWinError(rc)}, redraw);
+                continue;
+            }
+            target.NavigateTo(letters[static_cast<size_t>(fields[0].choiceIndex)] + L"\\");
+            return;
+        }
+
+        const mc::NetworkConnectionInfo& conn = connections[static_cast<size_t>(result.index)];
+        if (result.key == VK_DELETE) {
+            int choice = ShowChoiceDialog(console, L"Network Connection",
+                                          {L"Disconnect \"" + conn.remoteName + L"\"?"},
+                                          {{L'Y', L"Yes"}, {L'N', L"No"}}, redraw);
+            if (choice == 0) {
+                std::wstring name = conn.localDevice.empty() ? conn.remoteName : conn.localDevice;
+                DWORD rc = mc::DisconnectNetworkDrive(name, false);
+                if (rc != NO_ERROR) {
+                    logger.Log(LogLevel::Warning, L"Disconnect failed for \"" + name + L"\": " + FormatWinError(rc));
+                    ShowMessage(console, L"Network Connection", {FormatWinError(rc)}, redraw);
+                }
+            }
+            continue;
+        }
+        // Enter: open the connection in the active panel.
+        std::filesystem::path dest = conn.localDevice.empty() ? std::filesystem::path(conn.remoteName)
+                                                               : std::filesystem::path(conn.localDevice + L"\\");
+        target.NavigateTo(dest);
+        return;
+    }
+}
+
+// IS-0022: the folder Share Folder and Unshare Folder act on -- the one under the
+// cursor, else the panel's own folder.
+std::filesystem::path ShareTargetFolder(const Panel& panel) {
+    const auto& entries = panel.Entries();
+    const int cursor = panel.Cursor();
+    if (cursor >= 0 && cursor < static_cast<int>(entries.size())) {
+        const Entry& e = entries[static_cast<size_t>(cursor)];
+        return mc::ShareTargetFolder(panel.Path(), e.name, e.isDirectory);
+    }
+    return panel.Path();
+}
+
+// NAV-015: Share Folder (Network menu, menu-only) -- creating an SMB share
+// always needs administrator rights, so this is a single, explicit, elevated
+// operation (SEC-003) with no unelevated attempt first (unlike Disk Label,
+// which can succeed unelevated on a removable drive).
+void DoShareFolder(Console& console, Panel& left, Panel& right, bool leftActive, Logger& logger) {
+    Panel& target = leftActive ? left : right;
+    if (RefuseInsideProvider(console, left, right, leftActive, target, kStrProviderUnavailableTitle)) return;
+    auto redraw = [&]() { DrawFrame(console, left, right, leftActive); };
+    if (target.Content() != nullptr) return;
+
+    const std::filesystem::path folder = ShareTargetFolder(target);
+
+    std::vector<mc::FormField> fields(3);
+    fields[0].kind = mc::FormFieldKind::Text;
+    fields[0].label = L"Share name";
+    fields[0].text = mc::DefaultShareName(folder);
+    fields[0].textCursor = fields[0].text.size();
+    fields[1].kind = mc::FormFieldKind::Text;
+    fields[1].label = L"Description";
+    fields[2].kind = mc::FormFieldKind::Choice;
+    fields[2].label = L"Access for Everyone";
+    fields[2].choices = {L"Read only", L"Full access"};
+    if (!mc::ShowFormDialog(console, L"Share Folder", fields, redraw)) return;
+
+    if (!mc::IsValidShareName(fields[0].text)) {
+        ShowMessage(console, L"Share Folder", {L"Not a valid share name."}, redraw);
+        return;
+    }
+    bool readOnly = fields[2].choiceIndex == 0;
+
+    int choice = ShowChoiceDialog(console, L"Share Folder",
+                                  {L"Share \"" + folder.wstring() + L"\" as \"" + fields[0].text + L"\"?",
+                                   L"This needs administrator rights."},
+                                  {{L'S', L"Share"}, {L'C', kStrCancelLabel}}, redraw);
+    if (choice != 0) return;
+
+    logger.Log(LogLevel::Warning,
+              L"Elevating share-folder: \"" + folder.wstring() + L"\" as \"" + fields[0].text + L"\"");
+    ElevatedRequest request{ElevatedAction::ShareFolder, folder};
+    request.text = fields[0].text;
+    request.description = fields[1].text;
+    request.readOnly = readOnly;
+    DWORD result = RunElevated(request);
+    if (result != ERROR_SUCCESS) {
+        logger.Log(LogLevel::Error, L"Elevated share-folder failed: " + FormatWinError(result));
+        ShowMessage(console, L"Share Folder", {FormatWinError(result)}, redraw);
+    }
+    gSharedFoldersDirty = true;  // IS-0022: the ">" appears at once
+}
+
+// NAV-015: Unshare Folder (Network menu, menu-only) -- lists the active
+// panel's own shares (NetShareEnum, no admin needed) and removes one
+// (NetShareDel, elevated, same single-operation pattern as Share Folder).
+void DoUnshareFolder(Console& console, Panel& left, Panel& right, bool leftActive, Logger& logger) {
+    Panel& target = leftActive ? left : right;
+    if (RefuseInsideProvider(console, left, right, leftActive, target, kStrProviderUnavailableTitle)) return;
+    auto redraw = [&]() { DrawFrame(console, left, right, leftActive); };
+    if (target.Content() != nullptr) return;
+
+    // IS-0022: the same folder Share Folder would use (the cursor folder); if that one
+    // isn't shared but the panel's own folder is, that one is offered instead.
+    std::filesystem::path folder = ShareTargetFolder(target);
+    std::vector<mc::ShareInfo> shares = mc::EnumerateSharesFor(folder);
+    if (shares.empty() && folder != target.Path()) {
+        std::vector<mc::ShareInfo> parentShares = mc::EnumerateSharesFor(target.Path());
+        if (!parentShares.empty()) {
+            folder = target.Path();
+            shares = std::move(parentShares);
+        }
+    }
+    if (shares.empty()) {
+        ShowMessage(console, L"Unshare Folder", {L"\"" + folder.wstring() + L"\" is not shared."}, redraw);
+        return;
+    }
+    std::vector<std::wstring> rows;
+    for (const auto& s : shares) rows.push_back(s.shareName + (s.readOnly ? L"  (read only)" : L"  (full access)"));
+    int index = ShowListChoice(console, L"Unshare Folder: " + folder.wstring(), rows, redraw);
+    if (index < 0) return;
+
+    const std::wstring& shareName = shares[static_cast<size_t>(index)].shareName;
+    int choice = ShowChoiceDialog(console, L"Unshare Folder",
+                                  {L"Remove the share \"" + shareName + L"\"?", L"This needs administrator rights."},
+                                  {{L'U', L"Unshare"}, {L'C', kStrCancelLabel}}, redraw);
+    if (choice != 0) return;
+
+    logger.Log(LogLevel::Warning, L"Elevating unshare-folder: \"" + shareName + L"\"");
+    ElevatedRequest request{ElevatedAction::UnshareFolder, {}};
+    request.text = shareName;
+    DWORD result = RunElevated(request);
+    if (result != ERROR_SUCCESS) {
+        logger.Log(LogLevel::Error, L"Elevated unshare-folder failed: " + FormatWinError(result));
+        ShowMessage(console, L"Unshare Folder", {FormatWinError(result)}, redraw);
+    }
+    gSharedFoldersDirty = true;  // IS-0022: the ">" goes at once
+}
+
 // FEA-0005: executes one menu item's action, per its MenuItemKind
 // (MenuBar.h). A SimulatedKey item reuses SimulateKeyPress unchanged â€” the
 // exact same "replay the key press" mechanism IS-0003's hint-bar clicks
@@ -4012,6 +6267,39 @@ void ExecuteMenuItem(Console& console, Config& config, Panel& left, Panel& right
             break;
         case MenuItemKind::EditKeyBindings:
             DoEditKeyBindings(console, left, right, leftActive);  // KEY-005
+            break;
+        case MenuItemKind::CheckCode:
+            DoGenerateCheckCode(console, left, right, leftActive);  // FOP-021
+            break;
+        case MenuItemKind::DiskLabel:
+            DoDiskLabel(console, left, right, leftActive, logger);  // NAV-013
+            break;
+        case MenuItemKind::NetworkConnection:
+            DoNetworkConnection(console, left, right, leftActive, logger);  // NAV-014
+            break;
+        case MenuItemKind::ShareFolder:
+            DoShareFolder(console, left, right, leftActive, logger);  // NAV-015
+            break;
+        case MenuItemKind::UnshareFolder:
+            DoUnshareFolder(console, left, right, leftActive, logger);  // NAV-015
+            break;
+        case MenuItemKind::FindEmptyFolders:
+            DoFindEmptyFolders(console, left, right, leftActive, logger);  // SRC-009
+            break;
+        case MenuItemKind::RevealInExplorer:
+            DoRevealInExplorer(console, left, right, leftActive, logger);  // NAV-019
+            break;
+        case MenuItemKind::CreateShortcut:
+            DoCreateShortcut(console, left, right, leftActive, logger);  // FOP-026
+            break;
+        case MenuItemKind::ExportListing:
+            DoExportListing(console, left, right, leftActive, logger);  // LIST-012
+            break;
+        case MenuItemKind::SecureDelete:
+            DoSecureDelete(console, left, right, leftActive, logger);  // FOP-024
+            break;
+        case MenuItemKind::RestoreFromBin:
+            DoRestoreFromBin(console, left, right, leftActive, logger);  // FOP-023
             break;
     }
 }
@@ -4100,53 +6388,20 @@ void HandleMouseEvent(Console& console, Panel& left, Panel& right, bool& leftAct
     // panel/hint-bar logic, the same "modal while showing" precedence a
     // right-click drag already gets over the left button's own gestures
     // just below.
-    bool isLeftPress = mouse.dwEventFlags == 0 && (mouse.dwButtonState & FROM_LEFT_1ST_BUTTON_PRESSED) != 0;
-    if (isLeftPress || menuState.active) {
+    // IS-0023: the rules (open on press, stay open through the release and any move, highlight on hover, activate
+    // on a release over an item after a drag, close on a press elsewhere / wheel / right button) are MenuBar.h's pure
+    // HandleMenuMouse, so the release of the opening click can no longer close the menu.
+    {
         const std::vector<TopMenu>& menus = gMergedMenus;
-        std::vector<PlacedMenuEntry> barEntries = LayOutMenuBarRow(menus, console.Width());
-        if (isLeftPress && mouse.dwMousePosition.Y == 0) {
-            for (const auto& entry : barEntries) {
-                SHORT entryEnd = static_cast<SHORT>(entry.col + entry.width);
-                if (mouse.dwMousePosition.X >= entry.col && mouse.dwMousePosition.X < entryEnd) {
-                    // Clicking the already-open menu's own entry closes it
-                    // (a toggle); clicking a different entry switches to it.
-                    menuState = (menuState.active && menuState.openMenuIndex == entry.menuIndex)
-                                    ? CloseMenu()
-                                    : OpenMenu(entry.menuIndex);
-                    return;
-                }
-            }
-            if (menuState.active) menuState = CloseMenu();
-            return;
+        const std::vector<PlacedMenuEntry> barEntries = LayOutMenuBarRow(menus, console.Width());
+        const mc::MenuMouseResult menuMouse =
+            mc::HandleMenuMouse(menuState, menus, barEntries, console.Width(), mouse.dwMousePosition.X,
+                                mouse.dwMousePosition.Y, mouse.dwButtonState, mouse.dwEventFlags);
+        if (menuMouse.effect == mc::MenuMouseEffect::Activate) {
+            const MenuItem item = menus[static_cast<size_t>(menuMouse.menuIndex)].items[static_cast<size_t>(menuMouse.itemIndex)];
+            ExecuteMenuItem(console, config, left, right, leftActive, logger, pluginManager, item);
         }
-        if (menuState.active) {
-            if (isLeftPress) {
-                auto openEntry = std::find_if(barEntries.begin(), barEntries.end(),
-                                              [&](const auto& entry) { return entry.menuIndex == menuState.openMenuIndex; });
-                const SHORT openMenuCol = openEntry != barEntries.end() ? openEntry->col : SHORT{0};
-                const TopMenu& openMenu = menus[static_cast<size_t>(menuState.openMenuIndex)];
-                DropdownLayout dropdown = LayOutOpenDropdown(openMenu, openMenuCol, console.Width());
-                for (size_t i = 0; i < dropdown.itemRows.size(); ++i) {
-                    SHORT rowEnd = static_cast<SHORT>(dropdown.col + dropdown.width);
-                    if (mouse.dwMousePosition.Y == dropdown.itemRows[i] && mouse.dwMousePosition.X >= dropdown.col &&
-                        mouse.dwMousePosition.X < rowEnd) {
-                        ExecuteMenuItem(console, config, left, right, leftActive, logger, pluginManager, openMenu.items[i]);
-                        menuState = CloseMenu();
-                        return;
-                    }
-                }
-            }
-            // A left-press elsewhere, or any other mouse activity (wheel,
-            // right-click, a move) while a menu is open â€” dismiss it
-            // without activating anything, then let this event fall
-            // through to the ordinary handling below only if it wasn't a
-            // press (a press elsewhere is fully consumed by closing the
-            // menu, matching standard "click away" menu behavior; a wheel/
-            // move with the menu open has nothing sensible to do to the
-            // panels underneath a covering dropdown either way).
-            menuState = CloseMenu();
-            if (isLeftPress) return;
-        }
+        if (menuMouse.effect != mc::MenuMouseEffect::NotForMenu) return;
     }
 
     // IS-0007: computed once from the panel/command-line state as of this
@@ -4319,8 +6574,13 @@ void HandleMouseEvent(Console& console, Panel& left, Panel& right, bool& leftAct
             const Panel& sourcePanel = drag.sourceIsLeftPanel ? left : right;
             const Panel& destPanel = dropHit->isLeftPanel ? left : right;
             bool isMove = (mouse.dwControlKeyState & SHIFT_PRESSED) != 0;
-            PerformCopyOrMove(console, left, right, leftActive, sourcePanel, drag.items, destPanel.Path(), isMove,
-                              logger);
+            if (sourcePanel.InProvider() || destPanel.InProvider()) {  // EXT-002
+                PerformProviderCopyOrMove(console, left, right, leftActive, sourcePanel, drag.items,
+                                          ProviderOf(destPanel), LocationOf(destPanel), isMove, logger);
+            } else {
+                PerformCopyOrMove(console, left, right, leftActive, sourcePanel.Path(), drag.items, destPanel.Path(), isMove,
+                                  logger);
+            }
         }
         drag = DragState{};
         return;
@@ -4396,6 +6656,7 @@ void HandleMouseEvent(Console& console, Panel& left, Panel& right, bool& leftAct
 // Edit (per the precedent noted on Process.{h,cpp}) rather than anything new.
 void DoOpenShell(Console& console, Panel& left, Panel& right, bool leftActive) {
     const Panel& target = leftActive ? left : right;
+    if (RefuseInsideProvider(console, left, right, leftActive, target, kStrProviderUnavailableTitle)) return;
     std::wstring shell = ResolveShellCommand();
 
     console.SuspendForChildProcess();
@@ -4417,6 +6678,7 @@ void DoOpenShell(Console& console, Panel& left, Panel& right, bool leftActive) {
 // already gets at a normal command prompt, not a custom parser of our own.
 void RunShellCommand(Console& console, Panel& left, Panel& right, bool leftActive, const std::wstring& commandText) {
     const Panel& target = leftActive ? left : right;
+    if (RefuseInsideProvider(console, left, right, leftActive, target, kStrProviderUnavailableTitle)) return;
     std::wstring shell = ResolveShellCommand();
 
     console.SuspendForChildProcess();
@@ -4432,6 +6694,57 @@ void RunShellCommand(Console& console, Panel& left, Panel& right, bool leftActiv
     }
 }
 
+// FOP-025 (Alt+Shift+V, File > Paste from Explorer): puts the files that were
+// copied or cut in Windows Explorer into the active folder, through the same
+// copy/move engine, conflict prompts, progress and error handling as F5/F6.
+// A cut asks once, because it removes the originals. Local folders only.
+void DoPasteFromExplorer(Console& console, Panel& left, Panel& right, bool leftActive, Logger& logger) {
+    Panel& target = leftActive ? left : right;
+    auto redraw = [&]() { DrawFrame(console, left, right, leftActive); };
+    if (target.Content() != nullptr || target.InProvider()) {
+        ShowMessage(console, kStrPasteTitle, {kStrPasteLocalOnly}, redraw);
+        return;
+    }
+    std::vector<std::filesystem::path> files;
+    bool isCut = false;
+    if (!mc::ReadClipboardFileList(files, isCut)) {
+        ShowMessage(console, kStrPasteTitle, {kStrPasteNoFiles}, redraw);
+        return;
+    }
+    // A source that has vanished since it was copied is reported; the rest continue.
+    std::vector<std::filesystem::path> present;
+    std::vector<std::wstring> notes;
+    for (const auto& f : files) {
+        if (mc::GetAttributesOrInvalid(f) == INVALID_FILE_ATTRIBUTES)
+            notes.push_back(f.filename().wstring() + L": no longer exists");
+        else
+            present.push_back(f);
+    }
+    mc::PastePlan plan = mc::PlanPaste(present, target.Path(), isCut);
+    for (const auto& d : plan.dropped) notes.push_back(d.first.filename().wstring() + L": " + d.second);
+    if (plan.TotalItems() == 0) {
+        std::vector<std::wstring> lines{kStrPasteNothingToPaste};
+        for (size_t i = 0; i < notes.size() && i < 6; ++i) lines.push_back(notes[i]);
+        ShowMessage(console, kStrPasteTitle, lines, redraw);
+        return;
+    }
+    if (plan.isMove) {
+        std::vector<std::wstring> lines{FormatItemCount(plan.TotalItems()), kStrPasteMoveQuestion,
+                                        L"-> " + target.Path().wstring()};
+        if (ShowChoiceDialog(console, kStrPasteTitle, lines, {{L'Y', kStrYesLabel}, {L'N', kStrNoLabel}}, redraw) != 0)
+            return;
+    }
+    for (const mc::PasteGroup& g : plan.groups) {
+        PerformCopyOrMove(console, left, right, leftActive, g.sourceDir, g.names, target.Path(), plan.isMove, logger);
+    }
+    if (!notes.empty()) {
+        std::vector<std::wstring> lines{L"Not pasted:"};
+        for (size_t i = 0; i < notes.size() && i < 6; ++i) lines.push_back(notes[i]);
+        if (notes.size() > 6) lines.push_back(L"... and " + std::to_wstring(notes.size() - 6) + L" more");
+        ShowMessage(console, kStrPasteTitle, lines, redraw);
+    }
+}
+
 void DoCopyOrMove(Console& console, Panel& left, Panel& right, bool leftActive, bool isMove, Logger& logger) {
     const Panel& source = leftActive ? left : right;
     const Panel& dest = leftActive ? right : left;
@@ -4442,10 +6755,17 @@ void DoCopyOrMove(Console& console, Panel& left, Panel& right, bool leftActive, 
 
     std::wstring verb = isMove ? kStrVerbMove : kStrVerbCopy;
     std::wstring header = FormatItemsToDestinationHeader(verb, items.size());
-    auto destPathOpt = ShowTextPrompt(console, header, dest.Path().wstring(), redraw);
+    auto destPathOpt = ShowTextPrompt(console, header, LocationOf(dest), redraw);
     if (!destPathOpt || destPathOpt->empty()) return;
 
-    PerformCopyOrMove(console, left, right, leftActive, source, items, std::filesystem::path(*destPathOpt), isMove,
+    // EXT-002: the typed destination is a path of the other panel's provider.
+    if (source.InProvider() || dest.InProvider()) {
+        PerformProviderCopyOrMove(console, left, right, leftActive, source, items, ProviderOf(dest), *destPathOpt,
+                                  isMove, logger);
+        return;
+    }
+
+    PerformCopyOrMove(console, left, right, leftActive, source.Path(), items, std::filesystem::path(*destPathOpt), isMove,
                       logger);
 }
 
@@ -4468,6 +6788,33 @@ void DoCopyAs(Console& console, Panel& left, Panel& right, bool leftActive, Logg
 
     auto typed = ShowTextPrompt(console, FormatCopyAsHeader(name), name, redraw);
     if (!typed) return;
+    if (source.InProvider()) {
+        // EXT-002 (and ZIP-011): a new name, or a path relative to the current
+        // folder ("sub/new.txt"); an existing folder or a trailing slash means
+        // "into it, keeping the name". Never outside the current location.
+        mc::IFileProvider& provider = *source.Provider();
+        mc::ProviderCopyAsTarget target = mc::ResolveProviderCopyAs(provider, source.ProviderPath(), name, *typed);
+        switch (target.problem) {
+            case mc::CopyAsProblem::Empty:
+                return;
+            case mc::CopyAsProblem::Unsafe:
+                ShowMessage(console, FormatCannotVerbTitle(kStrVerbCopy), {kStrProviderRelativeOnly}, redraw);
+                return;
+            case mc::CopyAsProblem::SameItem:
+                ShowMessage(console, FormatCannotVerbTitle(kStrVerbCopy), {kStrCopyAsSameItem}, redraw);
+                return;
+            case mc::CopyAsProblem::IntoItself:
+                ShowMessage(console, FormatCannotVerbTitle(kStrVerbCopy), {kStrProviderCopyIntoItself}, redraw);
+                return;
+            case mc::CopyAsProblem::None:
+                break;
+        }
+        PerformProviderCopyOrMove(console, left, right, leftActive, source, {name}, provider, target.targetDir,
+                                  /*isMove=*/false, logger, target.newName);
+        if (provider.SamePath(target.targetDir, source.ProviderPath()))
+            source.NavigateProvider(source.ProviderPath(), target.newName);
+        return;
+    }
     auto target = mc::ResolveCopyAsTarget(source.Path(), name, *typed);
     if (!target) return;
     if (PathsEquivalent(*target, source.Path() / name)) {
@@ -4475,7 +6822,7 @@ void DoCopyAs(Console& console, Panel& left, Panel& right, bool leftActive, Logg
         return;
     }
 
-    PerformCopyOrMove(console, left, right, leftActive, source, {name}, target->parent_path(), /*isMove=*/false,
+    PerformCopyOrMove(console, left, right, leftActive, source.Path(), {name}, target->parent_path(), /*isMove=*/false,
                       logger, *target);
     // IS-0001 precedent: put the cursor on the new copy when it landed in
     // the panel's own directory.
@@ -4498,6 +6845,7 @@ bool ConfirmDelete(Console& console, const Panel& left, const Panel& right, bool
 void QueueDelete(Console& console, const Panel& left, const Panel& right, bool leftActive, bool permanent,
                  const Config& config, JobWorker& jobs) {
     const Panel& source = leftActive ? left : right;
+    if (RefuseInsideProvider(console, left, right, leftActive, source, kStrJobsTitle, kStrProviderNoJobsHint)) return;
     auto redraw = [&]() { DrawFrame(console, left, right, leftActive); };
     if (source.Content()) {
         ShowMessage(console, kStrJobsTitle, {kStrQueueDeletePluginRefused}, redraw);
@@ -4543,6 +6891,23 @@ void DoDelete(Console& console, Panel& left, Panel& right, bool leftActive, bool
 
     std::vector<std::wstring> items = target.SelectionOrCursor();
     if (items.empty()) return;
+
+    // EXT-002: a provider has no Recycle Bin, so its delete is always
+    // permanent and confirmed as such (FOP-008 still applies).
+    if (target.InProvider()) {
+        if (RefuseWithoutCapability(console, left, right, leftActive, target, mc::CapDelete, kStrPermanentlyDeleteTitle))
+            return;
+        if (!ConfirmDelete(console, left, right, leftActive, items, /*permanent=*/true, config, false)) return;
+        ProgressUi ui{console, left, right, leftActive, kStrVerbDeleting};
+        ui.primaryPath = target.LocationText();
+        mc::ProviderOpHandlers handlers = MakeProviderHandlers(console, left, right, leftActive, ui, logger);
+        OperationOutcome outcome = mc::ProviderDeleteItems(*target.Provider(), target.ProviderPath(), items, handlers);
+        target.Refresh();
+        SyncOtherPanelIfSamePath(target, other);
+        ReportOutcome(console, left, right, leftActive, kStrVerbDelete, outcome, logger);
+        return;
+    }
+
     if (RefuseIfBusyWithJob(console, left, right, leftActive, ItemPaths(target.Path(), items))) return;
     if (!ConfirmDelete(console, left, right, leftActive, items, permanent, config, /*background=*/false)) return;
 
@@ -4569,8 +6934,44 @@ void DoDelete(Console& console, Panel& left, Panel& right, bool leftActive, bool
         logger.Log(LogLevel::Error, L"Elevated delete failed: \"" + path.wstring() + L"\": " + err);
         return false;
     };
+    // FOP-022: a Recycle Bin delete is undone by restoring from the bin, so
+    // remember what each item was (a file's size identifies its bin entry; a
+    // folder is matched by path and time) and when the delete began.
+    std::vector<mc::PathFingerprint> deleteBefore;
+    uint64_t deleteStartedUtc = 0;
+    if (!permanent) {
+        FILETIME now{};
+        GetSystemTimeAsFileTime(&now);
+        uint64_t ticks = (static_cast<uint64_t>(now.dwHighDateTime) << 32) | now.dwLowDateTime;
+        deleteStartedUtc = ticks > 20000000ull ? ticks - 20000000ull : 0;  // 2 s slack: the bin keeps whole seconds
+        for (const std::wstring& n : items) {
+            mc::PathFingerprint f;
+            DWORD a = mc::GetAttributesOrInvalid(target.Path() / n);
+            f.exists = a != INVALID_FILE_ATTRIBUTES;
+            f.isDirectory = f.exists && (a & FILE_ATTRIBUTE_DIRECTORY) && !(a & FILE_ATTRIBUTE_REPARSE_POINT);
+            if (f.exists && !f.isDirectory) f = mc::FingerprintOf(target.Path() / n);
+            deleteBefore.push_back(f);
+        }
+    }
     OperationOutcome outcome =
         DeleteItems(target.Path(), items, permanent, onItemStart, cancelPoll, onError, onElevateDelete);
+    LabelsAfterMoveOrDelete(target.Path(), items, nullptr);  // LIST-009
+    if (permanent) {
+        if (outcome.succeeded > 0) UndoClear();
+    } else if (outcome.succeeded > 0) {
+        std::vector<mc::UndoItem> gone;
+        for (size_t i = 0; i < items.size(); ++i) {
+            if (deleteBefore[i].exists && mc::GetAttributesOrInvalid(target.Path() / items[i]) == INVALID_FILE_ATTRIBUTES)
+                gone.push_back(mc::MakeDeletedItem(target.Path() / items[i], deleteBefore[i]));
+        }
+        if (gone.empty()) {
+            UndoClear();
+        } else {
+            std::wstring what = gone.size() == 1 ? L"delete " + gone.front().before.filename().wstring()
+                                                  : L"delete " + UndoCountText(gone.size(), L"item");
+            UndoRecord(mc::UndoKind::Delete, what, std::move(gone), deleteStartedUtc);
+        }
+    }
     target.Refresh();
     SyncOtherPanelIfSamePath(target, other);
     ReportOutcome(console, left, right, leftActive, kStrVerbDelete, outcome, logger);
@@ -4582,12 +6983,15 @@ void DoDelete(Console& console, Panel& left, Panel& right, bool leftActive, bool
 // touched incidentally (clearing read-only before a permanent delete).
 void DoChangeAttributes(Console& console, Panel& left, Panel& right, bool leftActive, Logger& logger) {
     Panel& target = leftActive ? left : right;
+    if (RefuseWithoutCapability(console, left, right, leftActive, target, mc::CapAttributes, kStrProviderUnavailableTitle))
+        return;
     Panel& other = leftActive ? right : left;
     auto redraw = [&]() { DrawFrame(console, left, right, leftActive); };
 
     std::vector<std::wstring> items = target.SelectionOrCursor();
     if (items.empty()) return;
-    if (RefuseIfBusyWithJob(console, left, right, leftActive, ItemPaths(target.Path(), items))) return;  // FOP-014
+    if (!target.InProvider() && RefuseIfBusyWithJob(console, left, right, leftActive, ItemPaths(target.Path(), items)))
+        return;  // FOP-014
 
     std::wstring header = items.size() == 1 ? L"\"" + items[0] + L"\"" : std::to_wstring(items.size()) + L" item(s)";
     int choice = ShowChoiceDialog(console, FormatToggleAttributeOnHeader(header), {kStrEachItemsCurrentStateFlipped},
@@ -4613,6 +7017,9 @@ void DoChangeAttributes(Console& console, Panel& left, Panel& right, bool leftAc
             return;
     }
 
+    std::vector<uint32_t> attributesBefore;  // FOP-022
+    for (const auto& name : items) attributesBefore.push_back(mc::GetAttributesOrInvalid(target.Path() / name));
+    bool attributeElevated = false;
     // ERR-003: offers Retry/Skip/Skip all/Cancel for a failure, same as
     // copy/move/delete (FOP-010) â€” the missing piece that kept ERR-003 at
     // Partial, since attribute toggling was the one multi-item operation
@@ -4621,13 +7028,25 @@ void DoChangeAttributes(Console& console, Panel& left, Panel& right, bool leftAc
     // Copy/Move/Delete â€” a large selection no longer toggles with a frozen
     // screen and no way to interrupt it.
     ProgressUi ui{console, left, right, leftActive, kStrVerbSettingAttributes};
-    ui.primaryPath = target.Path().wstring();
+    ui.primaryPath = target.LocationText();
+    if (target.InProvider()) {  // EXT-002: e.g. archive entries (CapAttributes)
+        const uint32_t bits[] = {FILE_ATTRIBUTE_READONLY, FILE_ATTRIBUTE_HIDDEN, FILE_ATTRIBUTE_SYSTEM,
+                                 FILE_ATTRIBUTE_ARCHIVE};
+        mc::ProviderOpHandlers handlers = MakeProviderHandlers(console, left, right, leftActive, ui, logger);
+        OperationOutcome outcome = mc::ProviderToggleAttributes(*target.Provider(), target.ProviderPath(), items,
+                                                                bits[static_cast<int>(flag)], handlers);
+        target.Refresh();
+        SyncOtherPanelIfSamePath(target, other);
+        ReportOutcome(console, left, right, leftActive, kStrVerbToggleAttribute, outcome, logger);
+        return;
+    }
     auto onItemStart = [&](const std::wstring& n, int done, int total) { return ui.OnItemStart(n, done, total); };
     auto onError = [&](const std::wstring& n, const std::wstring& msg, DWORD win32Error) {
         return AskFileError(console, left, right, leftActive, n, msg, win32Error);
     };
     // SEC-003: see DoCopyOrMove's onElevateCopy/onElevateMove for the shape.
     auto onElevateAttribute = [&](const std::filesystem::path& path, FileAttributeFlag f, std::wstring& err) {
+        attributeElevated = true;
         logger.Log(LogLevel::Warning, L"Elevating attribute toggle: \"" + path.wstring() + L"\"");
         DWORD result = RunElevated(ElevatedRequest{ElevatedAction::ToggleAttribute, path, {}, false, f});
         if (result == ERROR_SUCCESS) return true;
@@ -4637,9 +7056,133 @@ void DoChangeAttributes(Console& console, Panel& left, Panel& right, bool leftAc
     };
     OperationOutcome outcome =
         ToggleAttributes(target.Path(), items, flag, onItemStart, onError, onElevateAttribute);
+    if (attributeElevated) {
+        UndoClear();
+    } else {  // FOP-022: the items whose attributes actually changed
+        std::vector<mc::UndoItem> done;
+        for (size_t i = 0; i < items.size(); ++i) {
+            DWORD now = mc::GetAttributesOrInvalid(target.Path() / items[i]);
+            if (attributesBefore[i] != INVALID_FILE_ATTRIBUTES && now != INVALID_FILE_ATTRIBUTES && now != attributesBefore[i])
+                done.push_back(mc::MakeAttributeItem(target.Path() / items[i], attributesBefore[i]));
+        }
+        UndoRecord(mc::UndoKind::Attributes, L"change attributes of " + UndoCountText(done.size(), L"item"),
+                   std::move(done));
+    }
     target.Refresh();
     SyncOtherPanelIfSamePath(target, other);
     ReportOutcome(console, left, right, leftActive, kStrVerbToggleAttribute, outcome, logger);
+}
+
+// FOP-022 (Ctrl+Z, File > Undo): reverses the most recent recorded operation,
+// but only while every affected item is exactly as that operation left it.
+// One confirmation per undo; a refusal (something changed) drops the entry,
+// since it can never become valid again, and says so.
+void DoUndo(Console& console, Panel& left, Panel& right, bool leftActive, Logger& logger) {
+    auto redraw = [&]() { DrawFrame(console, left, right, leftActive); };
+    const mc::UndoEntry* top = gUndo.Top();
+    if (!top) {
+        ShowMessage(console, kStrUndoTitle, {kStrUndoNothing, kStrUndoNothingHint}, redraw);
+        return;
+    }
+    const mc::UndoEntry entry = *top;
+
+    mc::UndoCheck check = mc::CheckUndo(entry);
+    if (!check.ok) {
+        gUndo.Pop();
+        logger.Log(LogLevel::Info, L"Undo refused (" + entry.description + L"): " + check.problem);
+        ShowMessage(console, kStrUndoTitle, {L"Cannot undo: " + entry.description, check.problem, kStrUndoRefusedTail},
+                    redraw);
+        return;
+    }
+    std::vector<std::filesystem::path> touched;
+    for (const auto& item : entry.items) {
+        touched.push_back(item.before);
+        touched.push_back(item.after);
+    }
+    if (RefuseIfBusyWithJob(console, left, right, leftActive, touched)) return;  // FOP-014
+
+    std::vector<std::wstring> lines{L"Undo: " + entry.description + L"?"};
+    if (entry.kind == mc::UndoKind::Copy) lines.push_back(kStrUndoCopyNote);
+    if (entry.kind == mc::UndoKind::Delete) lines.push_back(kStrUndoDeleteNote);
+    lines.push_back(kStrUndoCheckNote);
+    int choice = ShowChoiceDialog(console, kStrUndoTitle, lines, {{L'Y', kStrYesLabel}, {L'N', kStrNoLabel}}, redraw);
+    if (choice != 0) return;
+
+    mc::UndoActions actions;
+    actions.recycle = [&](const std::filesystem::path& path, std::wstring& error) {
+        OperationOutcome o = DeleteItems(path.parent_path(), {path.filename().wstring()}, /*permanent=*/false);
+        if (o.succeeded == 1 && o.failed.empty()) return true;
+        error = o.failed.empty() ? std::wstring(kStrUndoRefusedTail) : o.failed.front().second;
+        return false;
+    };
+    // FOP-023: delete undo resolves each item in the Recycle Bin when it is
+    // asked, and restores it through the shell (never overwriting).
+    std::unique_ptr<mc::IRecycleBin> bin;
+    std::vector<mc::RecycleBinItem> binItems;
+    bool binListed = false;
+    auto resolve = [&](const std::filesystem::path& original, uint64_t notBefore, const mc::PathFingerprint& before,
+                       std::wstring& problem) -> const mc::RecycleBinItem* {
+        if (!binListed) {
+            binListed = true;
+            bin = mc::OpenShellRecycleBin(problem);
+            if (bin) binItems = bin->List(problem);
+        }
+        if (!bin) return nullptr;
+        const mc::RecycleBinItem* found =
+            mc::FindInBin(binItems, original, notBefore, before.bytes, /*matchSize=*/!before.isDirectory);
+        if (!found && problem.empty()) problem = L"not found in the Recycle Bin (emptied or restored elsewhere).";
+        return found;
+    };
+    actions.locate = [&](const std::filesystem::path& original, uint64_t notBefore, const mc::PathFingerprint& before,
+                         std::wstring& problem) { return resolve(original, notBefore, before, problem) != nullptr; };
+    actions.restore = [&](const std::filesystem::path& original, uint64_t notBefore, const mc::PathFingerprint& before,
+                          std::wstring& error) {
+        const mc::RecycleBinItem* item = resolve(original, notBefore, before, error);
+        if (!item) return false;
+        mc::RestoreCheck check = mc::CheckRestore(*item, [](const std::filesystem::path& p) {
+            return mc::GetAttributesOrInvalid(p) != INVALID_FILE_ATTRIBUTES;
+        });
+        if (!check.ok) {
+            error = check.message;
+            return false;
+        }
+        return bin->Restore(*item, error);
+    };
+    mc::UndoResult result = mc::PerformUndo(entry, actions);
+    if (result.reversed > 0 || result.ok) gUndo.Pop();  // something changed, so the entry is spent either way
+    if (!result.ok && result.reversed == 0) {  // nothing was done and it can never be: drop it, say so
+        gUndo.Pop();
+        logger.Log(LogLevel::Info, L"Undo refused (" + entry.description + L"): " + result.error);
+        ShowMessage(console, kStrUndoTitle, {L"Cannot undo: " + entry.description, result.error, kStrUndoRefusedTail},
+                    redraw);
+        left.Refresh();
+        right.Refresh();
+        return;
+    }
+    if (result.ok && (entry.kind == mc::UndoKind::Rename || entry.kind == mc::UndoKind::Move)) {
+        for (const auto& item : entry.items) LabelsAfterRename(item.after, item.before);  // LIST-009
+    }
+
+    left.Refresh();
+    right.Refresh();
+    if (!entry.items.empty() && (entry.kind == mc::UndoKind::Rename || entry.kind == mc::UndoKind::Move)) {
+        for (Panel* p : {&left, &right}) {  // IS-0001: the cursor lands on what came back
+            if (p->InProvider() || p->Content()) continue;
+            if (PathsEquivalent(p->Path(), entry.items.front().before.parent_path()))
+                p->NavigateTo(p->Path(), entry.items.front().before.filename().wstring());
+        }
+    }
+    if (result.ok) {
+        logger.Log(LogLevel::Info, L"Undone: " + entry.description);
+        gTransientNote = L"Undone: " + entry.description;
+    } else {
+        logger.Log(LogLevel::Error, L"Undo failed (" + entry.description + L"): " + result.error);
+        ShowMessage(console, kStrUndoTitle,
+                    {L"Undo stopped after " + std::to_wstring(result.reversed) + L" of " +
+                         std::to_wstring(entry.items.size()) + L" item(s):",
+                     result.error},
+                    redraw);
+    }
 }
 
 } // namespace
@@ -4745,6 +7288,8 @@ int wmain(int argc, wchar_t** argv) {
     // or slow directory does not monopolize the console input loop.
     Panel left(leftStart, config.groupDirectoriesFirst, /*incrementalLoading=*/true);
     Panel right(rightStart, config.groupDirectoriesFirst, /*incrementalLoading=*/true);
+    left.SetBriefView(previousSession.leftBrief);    // UI-017
+    right.SetBriefView(previousSession.rightBrief);
     bool leftActive = true;
     // UI-013, Part B: one DirectoryTreeContent per side, entered fresh on
     // Ctrl+T and left (SetContent(nullptr)) on Enter/Esc from inside it --
@@ -4792,7 +7337,34 @@ int wmain(int argc, wchar_t** argv) {
     // that only ever care whether it's empty, not where the cursor is.
     size_t commandLineCursor = 0;
     std::vector<std::wstring> commandHistory = config.persistCommandHistory ? LoadCommandHistory() : std::vector<std::wstring>{};
+    // NAV-017: the recently visited folders, restored from the previous clean exit.
+    if (config.persistRecentFolders) gRecentFolders.Replace(mc::LoadRecentFolders());
+    {
+        // LIST-009: the colour labels; a bad line is warned about and skipped.
+        auto loadedLabels = mc::LoadLabelsFrom(mc::LabelsFilePath());
+        gLabels.Replace(loadedLabels.entries);
+        for (const auto& w : loadedLabels.warnings) logger.Log(LogLevel::Warning, L"Labels: " + w);
+    }
+    std::wstring lastRecordedLeft;
+    std::wstring lastRecordedRight;
     int historyIndex = -1;  // -1 = not currently browsing history
+    // CLI-008: the reverse history search (Alt+R). The command line itself is untouched until Enter.
+    struct ReverseSearch {
+        bool active = false;
+        std::wstring text;
+        std::optional<size_t> match;
+    } reverseSearch;
+    // NAV-018: the path completion in progress (Ctrl+Space). Valid only while the command line still holds
+    // exactly what the last press produced; any other key clears it.
+    struct PathCompletionState {
+        bool valid = false;
+        bool listShown = false;
+        std::wstring baseText;  // the command line at the first press
+        std::wstring applied;   // the command line after the last press
+        mc::PathToken token;
+        std::vector<mc::CompletionEntry> candidates;
+        int index = -1;
+    } completion;
     // IS-0002: files currently open in a background (non-blocking) F4
     // editor session, being watched for changes â€” see PollPendingEdits.
     std::vector<PendingEdit> pendingEdits;
@@ -4802,6 +7374,14 @@ int wmain(int argc, wchar_t** argv) {
     SelectDragState selectDrag;
     // IS-0006: cross-iteration config-file-edit watch state â€” see ConfigWatch's own comment.
     ConfigWatch configWatch;
+    // LIST-007: per-panel external-change watch + debounce â€” see AutoRefreshState.
+    AutoRefreshState leftAutoRefresh;
+    AutoRefreshState rightAutoRefresh;
+    struct FolderSizeSeen {
+        std::wstring path;
+        uint64_t starts = 0;
+    };
+    FolderSizeSeen leftSizeSeen, rightSizeSeen;  // LIST-010
     // FEA-0005: cross-iteration top-menu-bar state â€” see MenuBarState's own comment.
     MenuBarState menuState;
 
@@ -4813,6 +7393,7 @@ int wmain(int argc, wchar_t** argv) {
     // query host function.
     PluginManager pluginManager;
     gPluginManager = &pluginManager;  // EXT-003: viewer plugins for F3 / Shift+F3
+    pluginManager.SetPauseToken(&gForegroundPause);  // FOP-015: one shared pause for host and plugin operations
     pluginManager.SetAppContext(console, left, right, leftActive,
                                [&]() { DrawFrame(console, left, right, leftActive); });
     RegisterThemeChangeListener(
@@ -4834,11 +7415,52 @@ int wmain(int argc, wchar_t** argv) {
     ApplyMenuKeyTexts(gMergedMenus, pluginManager);
 
     bool running = true;
+    ULONGLONG lastShareReadMs = 0;          // IS-0022
+    auto leftShareSeen = left.RefreshStarts();
+    auto rightShareSeen = right.RefreshStarts();
     while (running) {
         left.PumpRefresh();
         right.PumpRefresh();
         PollPendingEdits(pendingEdits, left, right);
         PollConfigWatch(configWatch, config, console, left, right, leftActive, logger);
+        {
+            // LIST-007: defer while the user is mid-gesture.
+            const bool busy = menuState.active || !commandLine.empty() || drag.dragging;
+            PollAutoRefresh(leftAutoRefresh, left, config, busy);
+            PollAutoRefresh(rightAutoRefresh, right, config, busy);
+            gShowLabels = config.showLabels;  // LIST-009: follows a live config reload
+            // IS-0022 / LIST-013: shared-folder marks. Re-read every shareRefreshSeconds
+            // (0 = never on a timer), when a command asked for it, and when a panel re-lists.
+            gShowShares = config.showShares;
+            if (gShowShares) {
+                const ULONGLONG nowMs = GetTickCount64();
+                const bool relisted = leftShareSeen != left.RefreshStarts() || rightShareSeen != right.RefreshStarts();
+                leftShareSeen = left.RefreshStarts();
+                rightShareSeen = right.RefreshStarts();
+                const bool timerDue = config.shareRefreshSeconds > 0 &&
+                                      nowMs - lastShareReadMs >= static_cast<ULONGLONG>(config.shareRefreshSeconds) * 1000;
+                if (gSharedFoldersDirty || relisted || timerDue || lastShareReadMs == 0) {
+                    RefreshSharedFolders();
+                    lastShareReadMs = nowMs ? nowMs : 1;
+                }
+            }
+            // LIST-010: the worker lives only while the setting is on; a re-list of the
+            // same folder (Ctrl+R, auto-refresh) makes every measured total stale.
+            gFolderSizesOn = config.folderSizes;
+            if (gFolderSizesOn && !gFolderSizes) gFolderSizes = std::make_unique<mc::FolderSizeWorker>();
+            if (!gFolderSizesOn && gFolderSizes) gFolderSizes.reset();
+            if (gFolderSizes) {
+                for (auto* p : {&left, &right}) {
+                    FolderSizeSeen& seen = p == &left ? leftSizeSeen : rightSizeSeen;
+                    const std::wstring now = p->Path().wstring();
+                    if (seen.path == now && seen.starts != p->RefreshStarts()) gFolderSizes->InvalidateAll();
+                    seen.path = now;
+                    seen.starts = p->RefreshStarts();
+                }
+            }
+            RecordRecentFolder(left, lastRecordedLeft);    // NAV-017
+            RecordRecentFolder(right, lastRecordedRight);
+        }
         ServiceJobPrompts(console, left, right, leftActive, jobs);
         PollBackgroundJobs(console, left, right, leftActive, jobs, jobsWatch);
         // FEA-0002: kept fresh every iteration rather than only after
@@ -4851,7 +7473,29 @@ int wmain(int argc, wchar_t** argv) {
         if (IsTerminalTooSmall(console)) {
             DrawTooSmallMessage(console);
         } else {
-            DrawFrame(console, left, right, leftActive, commandLine, menuState, commandLineCursor);
+            gCommandPromptOverride.clear();
+            gStatusOverride.clear();
+            std::wstring shownLine = commandLine;
+            size_t shownCursor = commandLineCursor;
+            if (reverseSearch.active) {
+                // CLI-008: "(reverse-search `text'): <match>"; "failing" while nothing matches.
+                gCommandPromptOverride = std::wstring(reverseSearch.match ? L"(reverse-search `" : L"(failing reverse-search `") +
+                                         reverseSearch.text + L"'): ";
+                shownLine = reverseSearch.match ? commandHistory[*reverseSearch.match] : std::wstring();
+                shownCursor = shownLine.size();
+                gStatusOverride = L"Alt+R older match   Enter use the match   Esc cancel   Backspace shorten";
+            }
+            if (!reverseSearch.active && completion.valid && completion.listShown && commandLine == completion.applied) {
+                // NAV-018: the candidates, the current one in brackets.
+                std::wstring list;
+                for (size_t i = 0; i < completion.candidates.size(); ++i) {
+                    if (i > 0) list += L"  ";
+                    const std::wstring name = completion.candidates[i].name + (completion.candidates[i].isDirectory ? L"\\" : L"");
+                    list += static_cast<int>(i) == completion.index ? L"[" + name + L"]" : name;
+                }
+                gStatusOverride = list;
+            }
+            DrawFrame(console, left, right, leftActive, shownLine, menuState, shownCursor);
             // IS-0003: a low-cost visual cue that a drag is in progress â€”
             // the console has no drag "ghost" rendering, so without this
             // the gesture would otherwise be entirely invisible.
@@ -4895,7 +7539,10 @@ int wmain(int argc, wchar_t** argv) {
                                  (keyEvent.dwControlKeyState & (LEFT_CTRL_PRESSED | RIGHT_CTRL_PRESSED)) != 0,
                                  (keyEvent.dwControlKeyState & SHIFT_PRESSED) != 0,
                                  (keyEvent.dwControlKeyState & (LEFT_ALT_PRESSED | RIGHT_ALT_PRESSED)) != 0};
-            if (keyEvent.wVirtualKeyCode == VK_F10 || gKeys.map.CommandFor(pressed) == mc::CommandId::Quit)
+            // EXT-002: unsaved archive edits can't be asked about on this
+            // screen; enlarging it brings back F10's save prompt.
+            if ((keyEvent.wVirtualKeyCode == VK_F10 || gKeys.map.CommandFor(pressed) == mc::CommandId::Quit) &&
+                !HasPendingProviderChanges(left, right))
                 running = false;
             continue;
         }
@@ -4904,6 +7551,7 @@ int wmain(int argc, wchar_t** argv) {
         int visibleRows =
             ComputeVisibleRows(console, GetHintContext(target, commandLine), !BuildStatusLine(target).empty());
         bool shiftHeld = (record.Event.KeyEvent.dwControlKeyState & SHIFT_PRESSED) != 0;
+        gTransientNote.clear();  // FOP-022
         bool ctrlHeld = (record.Event.KeyEvent.dwControlKeyState & (LEFT_CTRL_PRESSED | RIGHT_CTRL_PRESSED)) != 0;
         bool altHeld = (record.Event.KeyEvent.dwControlKeyState & (LEFT_ALT_PRESSED | RIGHT_ALT_PRESSED)) != 0;
         // IS-0017 Part 5: while a directory tree is open on one side, the
@@ -4914,6 +7562,18 @@ int wmain(int argc, wchar_t** argv) {
         // IS-0015 Part 3: inserts at the cursor (and advances it), not
         // always at the end -- the one shared ApplyLineEditKey primitive,
         // same as ShowTextPrompt/ShowFormDialog's own Text fields.
+        // UI-017: how many Brief-view columns fit across the active panel
+        // right now -- computed on demand (Left/Right/PgUp/PgDn only), not
+        // cached, since it depends on the panel's current width and its
+        // entries' own longest name.
+        auto briefColumnsNow = [&]() -> int {
+            mc::PanelLayout panelLayout = mc::ComputePanelLayout(console.Width(), leftActive, gSinglePanelLayout);
+            SHORT panelWidth = leftActive ? panelLayout.leftWidth : panelLayout.rightWidth;
+            SHORT longest = 0;
+            for (const auto& e : target.Entries())
+                longest = std::max(longest, static_cast<SHORT>(mc::StringDisplayWidth(e.name)));
+            return mc::ComputeBriefLayout(visibleRows, panelWidth, longest).columns;
+        };
         auto appendToCommandLine = [&](wchar_t c) {
             LineEdit edit{commandLine, commandLineCursor};
             if (ApplyLineEditKey(edit, 0, c)) {
@@ -4987,7 +7647,7 @@ int wmain(int argc, wchar_t** argv) {
             }
             continue;
         }
-        if (altHeld && mc::IsMnemonicKey(key)) {
+        if (altHeld && !shiftHeld && mc::IsMnemonicKey(key)) {  // Alt+Shift+<letter> is a command (FOP-025)
             int topIdx = FindTopMenuByMnemonic(menus, static_cast<wchar_t>(key));
             if (topIdx >= 0) {
                 menuState = OpenMenu(topIdx);
@@ -5037,6 +7697,54 @@ int wmain(int argc, wchar_t** argv) {
         // content covering the body, there is nothing on screen for a
         // history jump to visibly affect anyway, so it goes to the plugin
         // like any other key rather than adding a second silent exception.
+        // NAV-018: anything but Ctrl+Space (and a bare modifier press) ends a completion in progress.
+        if (!(ctrlHeld && key == VK_SPACE) && key != VK_CONTROL && key != VK_SHIFT && key != VK_MENU)
+            completion.valid = false;
+        // CLI-008: the reverse history search. Alt+R opens it (history permitting); while it is open,
+        // its own keys are handled here and any other key ends it, then acts normally.
+        if (reverseSearch.active) {
+            const auto& ke = record.Event.KeyEvent;
+            auto rematch = [&](size_t from) {
+                reverseSearch.match = mc::FindHistoryMatch(commandHistory, reverseSearch.text, from);
+            };
+            switch (mc::ClassifySearchKey(key, ctrlHeld, shiftHeld, altHeld, ke.uChar.UnicodeChar)) {
+                case mc::SearchKeyAction::StepOlder:
+                    if (reverseSearch.match && *reverseSearch.match > 0) {
+                        auto older = mc::FindHistoryMatch(commandHistory, reverseSearch.text, *reverseSearch.match - 1);
+                        if (older) reverseSearch.match = older;
+                    }
+                    continue;
+                case mc::SearchKeyAction::Accept:
+                    if (reverseSearch.match) {
+                        commandLine = commandHistory[*reverseSearch.match];
+                        commandLineCursor = commandLine.size();
+                        historyIndex = static_cast<int>(*reverseSearch.match);
+                    }
+                    reverseSearch = {};
+                    continue;
+                case mc::SearchKeyAction::Cancel:
+                    reverseSearch = {};
+                    continue;
+                case mc::SearchKeyAction::Backspace:
+                    if (!reverseSearch.text.empty()) reverseSearch.text.pop_back();
+                    rematch(commandHistory.size());
+                    continue;
+                case mc::SearchKeyAction::Insert:
+                    reverseSearch.text += ke.uChar.UnicodeChar;
+                    rematch(commandHistory.size());
+                    continue;
+                case mc::SearchKeyAction::Other:
+                    reverseSearch = {};  // ends the search; the key is handled below as usual
+                    break;
+            }
+        } else if (altHeld && !ctrlHeld && !shiftHeld && key == 'R' && !commandHistory.empty() &&
+                   target.Content() == nullptr) {
+            reverseSearch.active = true;
+            reverseSearch.text.clear();
+            reverseSearch.match = mc::FindHistoryMatch(commandHistory, L"", commandHistory.size());
+            continue;
+        }
+
         if (target.Content() && key != VK_TAB && key != VK_F10 && key != VK_F1) {
             target.Content()->OnKey(key, record.Event.KeyEvent.dwControlKeyState,
                                     record.Event.KeyEvent.uChar.UnicodeChar);
@@ -5069,6 +7777,14 @@ int wmain(int argc, wchar_t** argv) {
                     commandLineCursor = edit.cursor;
                     break;
                 }
+                // UI-017: a plain Left/Right was otherwise unused (only
+                // Alt+Left/Right means panel history) -- Brief view takes it
+                // to mean "one column back/forward", one column being
+                // visibleRows entries.
+                if (!altHeld && target.BriefView()) {
+                    target.MoveCursor(-visibleRows, visibleRows);
+                    break;
+                }
                 if (ClassifyNavigationKey(key, navCtx) == NavIntent::PanelHistoryBack) target.NavigateBack();
                 break;
             case VK_RIGHT:
@@ -5076,6 +7792,10 @@ int wmain(int argc, wchar_t** argv) {
                     LineEdit edit{commandLine, commandLineCursor};
                     ApplyLineEditKey(edit, key, 0);
                     commandLineCursor = edit.cursor;
+                    break;
+                }
+                if (!altHeld && target.BriefView()) {
+                    target.MoveCursor(visibleRows, visibleRows);
                     break;
                 }
                 if (ClassifyNavigationKey(key, navCtx) == NavIntent::PanelHistoryForward) target.NavigateForward();
@@ -5129,10 +7849,11 @@ int wmain(int argc, wchar_t** argv) {
                 }
                 break;
             case VK_PRIOR:
-                target.MoveCursor(-visibleRows, visibleRows);
+                // UI-017: Brief view moves by a screenful of columns, not one row page.
+                target.MoveCursor(-visibleRows * (target.BriefView() ? briefColumnsNow() : 1), visibleRows);
                 break;
             case VK_NEXT:
-                target.MoveCursor(visibleRows, visibleRows);
+                target.MoveCursor(visibleRows * (target.BriefView() ? briefColumnsNow() : 1), visibleRows);
                 break;
             case VK_HOME:
                 // IS-0015 Part 3: Home/End already had an unconditional
@@ -5153,7 +7874,10 @@ int wmain(int argc, wchar_t** argv) {
                 target.MoveCursor(static_cast<int>(target.Entries().size()), visibleRows);
                 break;
             case VK_RETURN:
-                if (altHeld) {
+                if (altHeld && shiftHeld) {
+                    // FOP-020: Alt+Shift+Enter, Total Commander's own disk-usage key.
+                    DoDiskUsage(console, left, right, leftActive);
+                } else if (altHeld) {
                     // FEA-0003: Alt+Enter, Explorer's own "show properties"
                     // convention â€” checked first, taking priority over
                     // every other VK_RETURN meaning below the same way
@@ -5254,7 +7978,7 @@ int wmain(int argc, wchar_t** argv) {
                     DoSynchronizeDirectories(console, left, right, leftActive, logger);  // SRC-007
                 } else if (shiftHeld) {
                     // SRC-006; F5 in its results list continues into SRC-007's sync.
-                    if (auto preset = DoCompareDirectories(console, left, right, leftActive, config))
+                    if (auto preset = DoCompareDirectories(console, left, right, leftActive, config, logger))
                         DoSynchronizeDirectories(console, left, right, leftActive, logger, preset);
                 } else {
                     DoRename(console, left, right, leftActive);
@@ -5263,7 +7987,7 @@ int wmain(int argc, wchar_t** argv) {
             case VK_F3:
                 if (altHeld) {
                     // SRC-008: File > Compare contents; Shift forces the built-in viewer.
-                    DoCompareFiles(console, left, right, leftActive, config, /*forceBuiltin=*/shiftHeld);
+                    DoCompareFiles(console, left, right, leftActive, config, /*forceBuiltin=*/shiftHeld, logger);
                 } else if (ctrlHeld) {
                     DoSort(target, SortKey::Name);
                 } else if (shiftHeld) {
@@ -5280,8 +8004,13 @@ int wmain(int argc, wchar_t** argv) {
                 }
                 break;
             case VK_F7:
-                if (altHeld) {
-                    DoSearch(console, left, right, leftActive);
+                if (ctrlHeld) {
+                    // UI-017: Full view (Ctrl+F7).
+                    target.SetBriefView(false);
+                } else if (altHeld && shiftHeld) {
+                    DoFindEmptyFolders(console, left, right, leftActive, logger);  // SRC-009
+                } else if (altHeld) {
+                    DoSearch(console, left, right, leftActive, logger);
                 } else if (shiftHeld) {
                     DoCreateNewFile(console, left, right, leftActive);
                 } else {
@@ -5302,6 +8031,14 @@ int wmain(int argc, wchar_t** argv) {
                     appendToCommandLine(record.Event.KeyEvent.uChar.UnicodeChar);
                 }
                 break;
+            case 'C':
+                if (ctrlHeld && shiftHeld) {
+                    // SEL-008: Ctrl+Shift+C.
+                    DoCopySelectedNames(console, left, right, leftActive);
+                } else {
+                    appendToCommandLine(record.Event.KeyEvent.uChar.UnicodeChar);
+                }
+                break;
             case 'H':
                 if (ctrlHeld) {
                     target.ToggleHiddenAndSystem();
@@ -5316,6 +8053,17 @@ int wmain(int argc, wchar_t** argv) {
                     // this case never runs at all -- the key-routing check
                     // above already sent it straight to that plugin's own
                     // OnPanelKey, same as every key but Tab/F1/F10.
+                    // EXT-002: a provider re-reads its source first (ZIP: the
+                    // archive file -- ZIP-009; a server: drops its cache).
+                    if (target.InProvider()) {
+                        std::wstring reloadError;
+                        mc::ProviderStatus st = target.Provider()->Reload(reloadError);
+                        if (st != mc::ProviderStatus::Ok && st != mc::ProviderStatus::Cancelled) {
+                            ShowMessage(console, kStrProviderUnavailableTitle,
+                                        {target.LocationText(), reloadError.empty() ? mc::ProviderStatusText(st) : reloadError},
+                                        [&]() { DrawFrame(console, left, right, leftActive); });
+                        }
+                    }
                     target.Refresh();
                 } else {
                     appendToCommandLine(record.Event.KeyEvent.uChar.UnicodeChar);
@@ -5331,8 +8079,14 @@ int wmain(int argc, wchar_t** argv) {
                     // Leaving (Enter/Esc/Ctrl+T again) is handled inside
                     // DirectoryTreeContent::OnKey instead, since by then
                     // this case is no longer the one receiving the key.
-                    DirectoryTreeContent& treeContent = leftActive ? leftTreeContent : rightTreeContent;
-                    treeContent.Enter(target, leftActive ? right : left);
+                    // EXT-002: the tree is of local folders; it would also
+                    // preview into the other panel, leaving a provider there.
+                    if (!RefuseInsideProvider(console, left, right, leftActive, target, kStrProviderUnavailableTitle) &&
+                        !RefuseInsideProvider(console, left, right, leftActive, leftActive ? right : left,
+                                              kStrProviderUnavailableTitle)) {
+                        DirectoryTreeContent& treeContent = leftActive ? leftTreeContent : rightTreeContent;
+                        treeContent.Enter(target, leftActive ? right : left);
+                    }
                 } else {
                     appendToCommandLine(record.Event.KeyEvent.uChar.UnicodeChar);
                 }
@@ -5347,6 +8101,84 @@ int wmain(int argc, wchar_t** argv) {
             case 'D':
                 if (ctrlHeld) {
                     DoDirectoryHotlist(console, left, right, leftActive, logger);  // NAV-007
+                } else {
+                    appendToCommandLine(record.Event.KeyEvent.uChar.UnicodeChar);
+                }
+                break;
+            case 'L':
+                if (ctrlHeld && shiftHeld) {
+                    DoLabelMenu(console, left, right, leftActive);  // LIST-009
+                } else if (ctrlHeld) {
+                    DoCycleLabel(console, left, right, leftActive);  // LIST-009
+                } else {
+                    appendToCommandLine(record.Event.KeyEvent.uChar.UnicodeChar);
+                }
+                break;
+            case 'U':
+                if (ctrlHeld) {
+                    DoSwapPanels(console, left, right, leftActive);  // NAV-016
+                } else {
+                    appendToCommandLine(record.Event.KeyEvent.uChar.UnicodeChar);
+                }
+                break;
+            case 'V':
+                if (altHeld && shiftHeld) {
+                    DoPasteFromExplorer(console, left, right, leftActive, logger);  // FOP-025
+                } else {
+                    appendToCommandLine(record.Event.KeyEvent.uChar.UnicodeChar);
+                }
+                break;
+            case 'Z':
+                if (ctrlHeld) {
+                    DoUndo(console, left, right, leftActive, logger);  // FOP-022
+                } else {
+                    appendToCommandLine(record.Event.KeyEvent.uChar.UnicodeChar);
+                }
+                break;
+            case VK_SPACE:
+                if (ctrlHeld) {
+                    // NAV-018: complete the typed path. Local folders only; the cursor must be at the end.
+                    if (commandLine.empty() || target.InProvider() || target.Content() != nullptr ||
+                        commandLineCursor != commandLine.size())
+                        break;
+                    if (completion.valid && commandLine == completion.applied) {
+                        completion.listShown = true;
+                        completion.index = mc::NextCompletionIndex(completion.index, completion.candidates.size());
+                        commandLine = mc::ApplyCompletion(completion.baseText, completion.token,
+                                                          completion.candidates[static_cast<size_t>(completion.index)], true);
+                        completion.applied = commandLine;
+                    } else {
+                        const mc::PathToken token = mc::ExtractPathToken(commandLine);
+                        std::optional<std::filesystem::path> folder = target.Path();
+                        if (!token.dir.empty()) folder = mc::ResolveExistingDirectory(target.Path(), token.dir);
+                        if (!folder) break;
+                        std::vector<mc::CompletionEntry> candidates = mc::FilterCompletions(
+                            mc::ListFolderForCompletion(*folder), token.name, target.ShowingHiddenAndSystem());
+                        if (candidates.empty()) break;
+                        const std::wstring before = commandLine;
+                        if (candidates.size() == 1) {
+                            commandLine = mc::ApplyCompletion(before, token, candidates[0], true);
+                            completion.valid = false;
+                        } else {
+                            const std::wstring prefix = mc::CommonCompletionPrefix(candidates);
+                            completion.valid = true;
+                            completion.listShown = false;
+                            completion.baseText = before;
+                            completion.token = token;
+                            completion.candidates = std::move(candidates);
+                            completion.index = -1;
+                            if (prefix.size() > token.name.size()) {
+                                commandLine = mc::ApplyCompletionPrefix(before, token, prefix);
+                            } else {  // nothing more to add: start cycling at once
+                                completion.listShown = true;
+                                completion.index = 0;
+                                commandLine = mc::ApplyCompletion(before, token, completion.candidates[0], true);
+                            }
+                            completion.applied = commandLine;
+                        }
+                    }
+                    commandLineCursor = commandLine.size();
+                    historyIndex = -1;
                 } else {
                     appendToCommandLine(record.Event.KeyEvent.uChar.UnicodeChar);
                 }
@@ -5395,7 +8227,10 @@ int wmain(int argc, wchar_t** argv) {
                 }
                 break;
             case VK_F8:
-                if (altHeld) {
+                if (ctrlHeld) {
+                    // UI-017: Brief view (Ctrl+F8).
+                    target.SetBriefView(true);
+                } else if (altHeld) {
                     // FOP-014: Alt+F8 / Alt+Shift+F8 queue the delete as a background job.
                     QueueDelete(console, left, right, leftActive, /*permanent=*/shiftHeld, config, jobs);
                 } else {
@@ -5419,7 +8254,8 @@ int wmain(int argc, wchar_t** argv) {
                 }
                 break;
             case VK_F9:
-                DoOpenShell(console, left, right, leftActive);
+                if (ctrlHeld) DoSort(target, SortKey::Attributes);  // LIST-011
+                else DoOpenShell(console, left, right, leftActive);
                 break;
             case VK_ESCAPE:
                 // IS-0005: Esc no longer quits the app when the command
@@ -5432,7 +8268,14 @@ int wmain(int argc, wchar_t** argv) {
                 break;
             case VK_F10:
                 // FOP-014: quitting with background jobs still active asks first.
-                if (ConfirmQuitWithJobs(console, left, right, leftActive, jobs, jobsWatch)) running = false;
+                if (ConfirmQuitWithJobs(console, left, right, leftActive, jobs, jobsWatch) &&
+                    ResolveProviderChangesBeforeQuit(left, right))
+                    running = false;
+                break;
+            case VK_F12:
+                // NAV-017: Alt+F12 -- the recently visited folders. SRC-010: Ctrl+F12 -- the largest files.
+                if (altHeld) DoRecentFolders(console, left, right, leftActive, logger);
+                else if (ctrlHeld) DoLargestFiles(console, left, right, leftActive);
                 break;
             case VK_F11:
                 // IS-0006: plain F11 is reserved by most terminal hosts
@@ -5462,17 +8305,26 @@ int wmain(int argc, wchar_t** argv) {
     // destructor order relative to `left`/`right`/`console` (also local to
     // this function, so destructor order would happen to work today, but
     // explicit is what every other shutdown-only write here already does).
+    // EXT-002: release every provider (and with it any plugin code behind it)
+    // before the plugins unload; the quit path already asked about unsaved
+    // changes. Then drop the temporary copies fetched for viewing.
+    left.CloseProvider(true);
+    right.CloseProvider(true);
+    RemoveProviderTempRoot();
+
     pluginManager.Shutdown();
     gPluginManager = nullptr;
 
     // NAV-008: this is the sole write point for the session file. Paths are
     // captured only after an explicit, normal loop exit (F10, IS-0005's sole quit key), never
     // during a file operation or from an abnormal-termination handler.
-    SaveSession(SessionState{left.Path(), right.Path(), gSinglePanelLayout});
+    gFolderSizes.reset();  // LIST-010: stop the background measurement before leaving
+    SaveSession(SessionState{left.Path(), right.Path(), gSinglePanelLayout, left.BriefView(), right.BriefView()});
     // CLI-004: same normal-exit-only write point as the session file, but
     // gated on the user's own setting â€” persistCommandHistory defaulting to
     // true is what makes history survive across runs at all.
     if (config.persistCommandHistory) SaveCommandHistory(commandHistory);
+    if (config.persistRecentFolders) mc::SaveRecentFolders(gRecentFolders.Entries());  // NAV-017
     logger.Log(LogLevel::Info, L"MyCommander exiting normally");
     CoUninitialize();
     return 0;

@@ -1,5 +1,6 @@
 #pragma once
 
+#include "FileProvider.h"
 #include "Search.h"  // SearchCancelPoll
 
 #include <cstdint>
@@ -101,6 +102,20 @@ std::optional<bool> FilesHaveEqualContent(const std::filesystem::path& a, const 
 CompareOutcome CompareDirectories(const std::filesystem::path& left, const std::filesystem::path& right,
                                   const CompareOptions& options, const SearchCancelPoll& cancelPoll = {},
                                   const CompareProgressCallback& onProgress = {});
+
+// EXT-002: the same comparison between any two file-system providers
+// (`left`/`right` are provider paths): listings through List, the content
+// check by streaming both files (OpenRead) side by side. A link is compared
+// as an entry and never descended or read (SEC-006). Names match
+// case-insensitively, as on the local disk.
+CompareOutcome CompareDirectories(IFileProvider& leftProvider, const std::wstring& left, IFileProvider& rightProvider,
+                                  const std::wstring& right, const CompareOptions& options,
+                                  const SearchCancelPoll& cancelPoll = {}, const CompareProgressCallback& onProgress = {});
+
+// A provider path below `root`: `relativePath` ("sub\\file.txt", as in
+// CompareItem) joined component by component with the provider's own rules.
+std::wstring JoinProviderRelative(const IFileProvider& provider, const std::wstring& root,
+                                  const std::filesystem::path& relativePath);
 
 // Which side(s) D4's panel marking selects for a status.
 inline bool MarksLeft(CompareStatus s) {

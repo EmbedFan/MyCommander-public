@@ -114,21 +114,27 @@ void Console::Present() {
     WriteConsoleOutputW(output_, buffer_.data(), bufSize, bufOrigin, &region);
 }
 
-bool PollAndConsumeEscape(Console& console) {
-    bool escapePressed = false;
+ProgressKeys PollProgressKeys(Console& console) {
+    ProgressKeys keys;
     INPUT_RECORD record;
     DWORD count = 0;
     while (PeekConsoleInputW(console.InputHandle(), &record, 1, &count) && count > 0) {
         DWORD consumed = 0;
         if (!ReadConsoleInputW(console.InputHandle(), &record, 1, &consumed) || consumed == 0) break;
-        if (record.EventType == KEY_EVENT && record.Event.KeyEvent.bKeyDown &&
-            record.Event.KeyEvent.wVirtualKeyCode == VK_ESCAPE) {
-            escapePressed = true;
+        if (record.EventType == KEY_EVENT && record.Event.KeyEvent.bKeyDown) {
+            const WORD vk = record.Event.KeyEvent.wVirtualKeyCode;
+            if (vk == VK_ESCAPE) {
+                keys.cancel = true;
+            } else if (vk == VK_PAUSE || (vk == 'P' && (record.Event.KeyEvent.dwControlKeyState &
+                                                        (LEFT_CTRL_PRESSED | RIGHT_CTRL_PRESSED | LEFT_ALT_PRESSED |
+                                                         RIGHT_ALT_PRESSED)) == 0)) {
+                keys.togglePause = !keys.togglePause;  // two presses in one drain cancel out
+            }
         } else if (record.EventType == WINDOW_BUFFER_SIZE_EVENT) {
             console.UpdateSize();
         }
     }
-    return escapePressed;
+    return keys;
 }
 
 } // namespace mc

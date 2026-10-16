@@ -246,3 +246,30 @@ TEST_CASE(VolumeKey_DriveAndUncShareRoots_FOP014) {
     CHECK(VolumeKey(L"C:\\Users\\bob\\file.txt") == L"C:\\");
     CHECK(VolumeKey(L"\\\\srv\\share\\dir\\file.txt") == L"\\\\srv\\share");
 }
+
+// --- FOP-015: a Paused job stays active -----------------------------------------
+
+TEST_CASE(OperationQueue_PausedJobIsActiveAndKeepsItsVolumeAndPaths_FOP015) {
+    OperationQueue queue;
+    Job first;
+    first.kind = JobKind::Copy;
+    first.sources = {L"C:\\data\\a.txt"};
+    first.destination = L"D:\\out";
+    uint64_t firstId = queue.Enqueue(first);
+    Job same;
+    same.kind = JobKind::Delete;
+    same.sources = {L"C:\\data\\a.txt"};
+    uint64_t sameId = queue.Enqueue(same);
+    (void)sameId;
+
+    auto running = queue.NextToRun();
+    CHECK(running.has_value() && running->id == firstId);
+    CHECK(queue.SetState(firstId, JobState::Paused));
+    CHECK(queue.ActiveCount() == 1);
+    CHECK(!queue.NextToRun().has_value());  // the delete still overlaps the paused copy
+    auto touching = queue.ActiveJobTouching({L"C:\\data\\a.txt"});
+    CHECK(touching.has_value() && touching->state == JobState::Paused);
+
+    queue.Finish(firstId, JobState::Done);
+    CHECK(queue.NextToRun().has_value());   // released only when it ends
+}

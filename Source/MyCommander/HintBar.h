@@ -63,6 +63,7 @@ inline std::vector<HintSegment> BuildDefaultHintSegments(HintContext context) {
                 seg(L"Backspace Edit", VK_BACK),
                 seg(L"Esc Clear", VK_ESCAPE),
                 info(L"Ctrl+Up/Down History"),
+                seg(L"Ctrl+Space Complete", VK_SPACE, /*ctrl=*/true),
                 seg(L"Ctrl+H Hidden", L'H', /*ctrl=*/true),
                 seg(L"F9 Shell", VK_F9),
                 seg(L"F1 Help", VK_F1),

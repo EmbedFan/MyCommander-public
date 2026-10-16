@@ -7,6 +7,7 @@
 #include <filesystem>
 
 using mc::AppendMissingConfigKeys;
+using mc::AutoRefreshMode;
 using mc::ColorTheme;
 using mc::ColumnId;
 using mc::Config;
@@ -639,4 +640,95 @@ TEST_CASE(LoadConfigFrom_DiffProgram_SRC008) {
     CHECK(result.warnings.empty());
     CHECK(result.config.diffProgram == L"\"C:\\Tools\\WinMergeU.exe\" \"%1\" \"%2\"");
     CHECK(LoadConfigFrom(dir.Path() / L"missing.ini").config.diffProgram.empty());  // default: built-in viewer
+}
+
+TEST_CASE(LoadConfigFrom_AutoRefresh_LIST007) {
+    test::TempDir dir;
+    auto path = dir.Path() / L"mycommander.ini";
+
+    auto defaults = LoadConfigFrom(dir.Path() / L"missing.ini");
+    CHECK(defaults.config.autoRefresh == AutoRefreshMode::On);
+    CHECK(defaults.config.autoRefreshPollSeconds == 10);
+
+    test::WriteFileContent(path, "autoRefresh = poll\nautoRefreshPollSeconds = 30\n");
+    auto result = LoadConfigFrom(path);
+    CHECK(result.warnings.empty());
+    CHECK(result.config.autoRefresh == AutoRefreshMode::Poll);
+    CHECK(result.config.autoRefreshPollSeconds == 30);
+
+    test::WriteFileContent(path, "autoRefresh = OFF\n");
+    CHECK(LoadConfigFrom(path).config.autoRefresh == AutoRefreshMode::Off);
+
+    test::WriteFileContent(path, "autoRefresh = sometimes\nautoRefreshPollSeconds = 0\n");
+    auto bad = LoadConfigFrom(path);
+    CHECK(bad.warnings.size() == 2);
+    CHECK(bad.config.autoRefresh == AutoRefreshMode::On);  // default kept
+    CHECK(bad.config.autoRefreshPollSeconds == 10);
+}
+
+TEST_CASE(LoadConfigFrom_PersistRecentFolders_NAV017) {
+    test::TempDir dir;
+    auto path = dir.Path() / L"mycommander.ini";
+    CHECK(LoadConfigFrom(dir.Path() / L"missing.ini").config.persistRecentFolders);  // default: on
+
+    test::WriteFileContent(path, "persistRecentFolders = false\n");
+    auto off = LoadConfigFrom(path);
+    CHECK(off.warnings.empty());
+    CHECK(!off.config.persistRecentFolders);
+
+    test::WriteFileContent(path, "persistRecentFolders = maybe\n");
+    auto bad = LoadConfigFrom(path);
+    CHECK(bad.warnings.size() == 1);
+    CHECK(bad.config.persistRecentFolders);  // a bad value keeps the default
+}
+
+TEST_CASE(LoadConfigFrom_ShowLabels_LIST009) {
+    test::TempDir dir;
+    auto path = dir.Path() / L"mycommander.ini";
+    CHECK(LoadConfigFrom(dir.Path() / L"missing.ini").config.showLabels);  // default: on
+
+    test::WriteFileContent(path, "showLabels = false\n");
+    auto off = LoadConfigFrom(path);
+    CHECK(off.warnings.empty());
+    CHECK(!off.config.showLabels);
+}
+
+TEST_CASE(LoadConfigFrom_ShowShares_AndRefreshSeconds_LIST013) {
+    test::TempDir dir;
+    auto path = dir.Path() / L"mycommander.ini";
+    auto defaults = LoadConfigFrom(dir.Path() / L"missing.ini");
+    CHECK(defaults.config.showShares);
+    CHECK(defaults.config.shareRefreshSeconds == 3);
+
+    test::WriteFileContent(path, "showShares = false\nshareRefreshSeconds = 0\n");
+    auto off = LoadConfigFrom(path);
+    CHECK(off.warnings.empty());
+    CHECK(!off.config.showShares);
+    CHECK(off.config.shareRefreshSeconds == 0);
+
+    test::WriteFileContent(path, "shareRefreshSeconds = 30\n");
+    CHECK(LoadConfigFrom(path).config.shareRefreshSeconds == 30);
+
+    test::WriteFileContent(path, "shareRefreshSeconds = soon\n");
+    auto bad = LoadConfigFrom(path);
+    CHECK(!bad.warnings.empty());
+    CHECK(bad.config.shareRefreshSeconds == 3);
+    test::WriteFileContent(path, "shareRefreshSeconds = 99999\n");
+    CHECK(LoadConfigFrom(path).config.shareRefreshSeconds == 3);
+}
+
+TEST_CASE(LoadConfigFrom_FolderSizes_LIST010) {
+    test::TempDir dir;
+    auto path = dir.Path() / L"mycommander.ini";
+    CHECK(!LoadConfigFrom(dir.Path() / L"missing.ini").config.folderSizes);  // default: off
+
+    test::WriteFileContent(path, "folderSizes = on\n");
+    auto on = LoadConfigFrom(path);
+    CHECK(on.warnings.empty());
+    CHECK(on.config.folderSizes);
+
+    test::WriteFileContent(path, "folderSizes = sometimes\n");
+    auto bad = LoadConfigFrom(path);
+    CHECK(bad.warnings.size() == 1);
+    CHECK(!bad.config.folderSizes);  // a bad value keeps the default
 }

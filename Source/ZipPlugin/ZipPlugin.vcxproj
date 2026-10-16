@@ -63,6 +63,7 @@
   </PropertyGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <ClCompile>
+      <MultiProcessorCompilation>true</MultiProcessorCompilation>
       <WarningLevel>Level4</WarningLevel>
       <SDLCheck>true</SDLCheck>
       <PreprocessorDefinitions>_DEBUG;_WINDOWS;_USRDLL;UNICODE;_UNICODE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
@@ -77,6 +78,7 @@
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <ClCompile>
+      <MultiProcessorCompilation>true</MultiProcessorCompilation>
       <WarningLevel>Level4</WarningLevel>
       <SDLCheck>true</SDLCheck>
       <FunctionLevelLinking>true</FunctionLevelLinking>
@@ -114,6 +116,7 @@ copy /Y "$(TargetPath)" "$(ProjectDir)..\MyCommander\Build\$(Platform)\$(Configu
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="ZipPlugin.cpp" />
+    <ClCompile Include="ZipCrypto.cpp" />
     <!-- Vendored third-party source (DEC-010, AIPrompt/features/FEA-0007-plan.md),
          compiled as C (cl.exe's own default for a .c extension; the
          project's C++20/ConformanceMode settings above don't apply to it).
@@ -133,6 +136,7 @@ copy /Y "$(TargetPath)" "$(ProjectDir)..\MyCommander\Build\$(Platform)\$(Configu
     <ClInclude Include="..\MyCommanderPluginSdk\McPluginTypes.h" />
     <ClInclude Include="..\MyCommanderPluginSdk\McPluginVersion.h" />
     <ClInclude Include="Version.h" />
+    <ClInclude Include="ZipCrypto.h" />
     <ClInclude Include="third_party\miniz\miniz.h" />
   </ItemGroup>
   <ItemGroup>
@@ -144,6 +148,7 @@ copy /Y "$(TargetPath)" "$(ProjectDir)..\MyCommander\Build\$(Platform)\$(Configu
   </ItemGroup>
   <ItemGroup>
     <None Include="ZipNavigationTests.cpp" />
+    <None Include="ZipCryptoTests.cpp" />
     <None Include="ZipConsoleTests.cpp" />
     <None Include="..\MyCommanderPluginSdk\PluginVersionTemplate.rc" />
     <None Include="third_party\miniz\LICENSE" />

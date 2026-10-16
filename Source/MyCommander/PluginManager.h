@@ -96,6 +96,10 @@ struct PluginShortcutKey {
 // duplicated here as a second pure function.
 bool ConflictsWithBuiltinShortcut(const PluginShortcutKey& key, const std::vector<PluginShortcutKey>& builtinKeys);
 
+// API 1.13 (FEA-0010) NavigatePanel's rule, pure: a panel showing plugin content or a provider
+// is never navigated behind the plugin's or provider's back.
+bool CanNavigatePanel(bool panelHasContent, bool panelInProvider);
+
 // The fixed inventory of every VK+modifier combination `wmain`'s own
 // key-dispatch switch and FEA-0005's menu-mnemonic dispatch already bind
 // to something -- hand-maintained, since there is no other single source
@@ -117,6 +121,7 @@ std::vector<PluginShortcutKey> BuiltinShortcutInventory(const KeyMap& keyMap);
 // One successfully loaded, active plugin's own state -- the host's
 // bookkeeping, never exposed to other plugins.
 struct LoadedPlugin {
+    uint32_t apiMinor = 0;  // McPluginInfo::apiVersionMinor it was built against (FOP-015 gates pausing on >= 11)
     std::wstring id;
     std::wstring name;
     std::wstring version;  // IS-0011: McPluginMetadata::version, surfaced on the F1 help page
@@ -144,6 +149,7 @@ struct LoadedPlugin {
     McPlugin_CanViewFileFn canViewFileFn = nullptr;
     McPlugin_RenderViewFn renderViewFn = nullptr;
     McPlugin_GetViewerNameFn getViewerNameFn = nullptr;
+    bool fileSystem = false;  // API 1.12 (EXT-002): declared kMcPluginCapFileSystem
 };
 
 // --- EXT-003: viewer plugins (pure parts, PluginManagerLogic.cpp) -----------
@@ -365,6 +371,23 @@ public:
     void HostUpdateProgress(uint64_t completed, uint64_t total, const wchar_t* message);
     void HostEndProgress();
     bool HostPollCancel();
+    // FOP-015 (API 1.11): blocks while the user has paused the operation; false if cancelled.
+    bool HostWaitWhilePaused();
+    // The foreground pause token main.cpp shares with its own progress polling.
+    void SetPauseToken(class PauseToken* token) { pause_ = token; }
+
+    // API 1.12 (EXT-002): file-system providers (McFileSystem.h).
+    bool HostOpenProvider(McPanelSide side, const McFsProvider* table, const wchar_t* startPath,
+                          const wchar_t* returnSelectName);
+    bool HostCloseProvider(McPanelSide side);
+    void* HostGetPanelProvider(McPanelSide side);
+    bool HostGetPanelProviderPath(McPanelSide side, wchar_t* outBuffer, int outBufferSize);
+    bool HostIsPanelInProvider(McPanelSide side);
+    // API 1.13 (FEA-0010): go to a folder in panel `side`; false when it shows content or a provider.
+    bool HostNavigatePanel(McPanelSide side, const wchar_t* path);
+    // Asked before a panel leaves a plugin provider with unsaved changes:
+    // Save / Don't save / Cancel. True when the panel may leave.
+    bool ConfirmLeaveProvider(IFileProvider& provider);
 
 private:
     // Defined out-of-line in PluginManager.cpp as `PluginManager::
@@ -385,8 +408,15 @@ private:
     // per-plugin cleanup loop and (for panel content only) HostReleasePanelContent.
     void ReleasePanelContentOwnedBy(const std::wstring& pluginId);
     void UnpublishServicesOwnedBy(const std::wstring& pluginId);
+    // EXT-002: closes (without asking) every panel provider `pluginId` opened,
+    // before its DLL unloads.
+    void ReleaseProvidersOwnedBy(const std::wstring& pluginId);
+    // The provider on `side` if it is a plugin provider owned by `pluginId`.
+    class PluginProviderAdapter* OwnedProvider(McPanelSide side, const std::wstring& pluginId);
+    std::vector<std::wstring> scopeStack_;  // EXT-002: plugin attribution around provider calls
 
     Console* console_ = nullptr;
+    class PauseToken* pause_ = nullptr;
     std::unique_ptr<class AnimatedProgressDialog> progressDialog_;
     std::wstring progressOwner_;
     Panel* leftPanel_ = nullptr;

@@ -113,13 +113,19 @@ std::optional<bool> ContentEqual(const fs::path& a, const fs::path& b, const Sea
     }
 }
 
+// How a comparison reaches its two sides: the local disk (Win32) or two
+// file-system providers (EXT-002) -- CompareLevel itself doesn't know which.
+using ListFn = std::function<bool(bool leftSide, const fs::path& rel, Listing& out)>;
+using ContentFn = std::function<std::optional<bool>(const fs::path& rel, bool* cancelled,
+                                                    const std::function<void()>& onChunk)>;
+
 struct Context {
-    const fs::path& leftRoot;
-    const fs::path& rightRoot;
     const CompareOptions& options;
     const SearchCancelPoll& cancelPoll;
     const CompareProgressCallback& onProgress;
     CompareOutcome& out;
+    ListFn list;
+    ContentFn content;
     size_t itemsCompared = 0;
 
     void Report(const std::wstring& current) {
@@ -190,10 +196,9 @@ bool CompareLevel(Context& ctx, const fs::path& relDir, int depth, const Listing
                 bool cancelled = false;
                 size_t chunks = 0;
                 std::wstring current = rel.wstring();
-                contentEqual = ContentEqual(ctx.leftRoot / rel, ctx.rightRoot / rel, ctx.cancelPoll, &out.bytesRead,
-                                            &cancelled, [&] {
-                                                if ((++chunks & 15) == 0) ctx.Report(current);  // every 1 MB
-                                            });
+                contentEqual = ctx.content(rel, &cancelled, [&] {
+                    if ((++chunks & 15) == 0) ctx.Report(current);  // every 1 MB
+                });
                 if (cancelled) {
                     out.items.pop_back();
                     out.cancelled = true;
@@ -208,10 +213,8 @@ bool CompareLevel(Context& ctx, const fs::path& relDir, int depth, const Listing
         if (ctx.options.recursive && l && r && l->isDirectory && r->isDirectory && !l->isReparsePoint &&
             !r->isReparsePoint) {
             Listing childLeft, childRight;
-            bool okLeft = ListDirectory(ctx.leftRoot / rel, ctx.options.includeHiddenLeft, ctx.options.fileMaskLeft,
-                                        childLeft);
-            bool okRight = ListDirectory(ctx.rightRoot / rel, ctx.options.includeHiddenRight,
-                                         ctx.options.fileMaskRight, childRight);
+            bool okLeft = ctx.list(true, rel, childLeft);
+            bool okRight = ctx.list(false, rel, childRight);
             if (!okLeft || !okRight) {
                 status = CompareStatus::Unreadable;
                 ++out.unreadable;
@@ -274,7 +277,113 @@ CompareOutcome CompareDirectories(const fs::path& left, const fs::path& right, c
     out.leftListed = ListDirectory(left, options.includeHiddenLeft, options.fileMaskLeft, leftListing);
     out.rightListed = ListDirectory(right, options.includeHiddenRight, options.fileMaskRight, rightListing);
     if (!out.leftListed || !out.rightListed) return out;
-    Context ctx{left, right, options, cancelPoll, onProgress, out};
+    Context ctx{options, cancelPoll, onProgress, out};
+    ctx.list = [&](bool leftSide, const fs::path& rel, Listing& listing) {
+        return leftSide ? ListDirectory(left / rel, options.includeHiddenLeft, options.fileMaskLeft, listing)
+                        : ListDirectory(right / rel, options.includeHiddenRight, options.fileMaskRight, listing);
+    };
+    ctx.content = [&](const fs::path& rel, bool* cancelled, const std::function<void()>& onChunk) {
+        return ContentEqual(left / rel, right / rel, cancelPoll, &out.bytesRead, cancelled, onChunk);
+    };
+    CompareLevel(ctx, fs::path(), 0, leftListing, rightListing);
+    return out;
+}
+
+std::wstring JoinProviderRelative(const IFileProvider& provider, const std::wstring& root, const fs::path& relativePath) {
+    std::wstring path = root;
+    for (const auto& part : relativePath) {
+        std::wstring segment = part.wstring();
+        if (segment.empty() || segment == L"\\" || segment == L"/") continue;
+        path = provider.Join(path, segment);
+    }
+    return path;
+}
+
+namespace {
+
+bool ListProvider(IFileProvider& provider, const std::wstring& dir, bool includeHidden, const std::wstring& mask,
+                  const SearchCancelPoll& cancelPoll, Listing& out) {
+    std::vector<ProviderEntry> entries;
+    std::wstring error;
+    ProviderStatus status = provider.List(dir, entries, cancelPoll, error);
+    if (status != ProviderStatus::Ok) return false;
+    for (const auto& e : entries) {
+        if ((e.attributes & (FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM)) != 0 && !includeHidden) continue;
+        if (!e.isDirectory && !mask.empty() && !WildcardMatch(e.name, mask)) continue;
+        CompareSide side;
+        side.isDirectory = e.isDirectory;
+        side.isReparsePoint = e.isLink;
+        side.attributes = e.attributes;
+        side.size = e.isDirectory ? 0 : e.size;
+        side.lastWriteUtc = e.modifiedUtc;
+        out.emplace_back(e.name, side);
+    }
+    std::sort(out.begin(), out.end(), [](const auto& a, const auto& b) { return CompareNames(a.first, b.first) < 0; });
+    return true;
+}
+
+// Fills `buffer` from `in` (looping over short reads); false on a read error.
+bool ReadFullStream(IReadStream& in, char* buffer, size_t size, size_t& got) {
+    got = 0;
+    std::wstring error;
+    while (got < size) {
+        size_t n = 0;
+        if (in.Read(buffer + got, size - got, n, error) != ProviderStatus::Ok) return false;
+        if (n == 0) break;
+        got += n;
+    }
+    return true;
+}
+
+std::optional<bool> ProviderContentEqual(IFileProvider& lp, const std::wstring& a, IFileProvider& rp,
+                                         const std::wstring& b, const SearchCancelPoll& cancelPoll,
+                                         uint64_t* bytesRead, bool* cancelled, const std::function<void()>& onChunk) {
+    if (cancelled) *cancelled = false;
+    std::unique_ptr<IReadStream> ia, ib;
+    std::wstring error;
+    if (lp.OpenRead(a, ia, cancelPoll, error) != ProviderStatus::Ok) return std::nullopt;
+    if (rp.OpenRead(b, ib, cancelPoll, error) != ProviderStatus::Ok) return std::nullopt;
+    std::vector<char> bufA(kChunkBytes), bufB(kChunkBytes);
+    for (;;) {
+        if (cancelPoll && cancelPoll()) {
+            if (cancelled) *cancelled = true;
+            return std::nullopt;
+        }
+        size_t gotA = 0, gotB = 0;
+        if (!ReadFullStream(*ia, bufA.data(), kChunkBytes, gotA) || !ReadFullStream(*ib, bufB.data(), kChunkBytes, gotB))
+            return std::nullopt;
+        if (bytesRead) *bytesRead += static_cast<uint64_t>(gotA) + gotB;
+        if (onChunk) onChunk();
+        if (gotA != gotB) return false;
+        if (gotA == 0) return true;
+        if (std::memcmp(bufA.data(), bufB.data(), gotA) != 0) return false;
+    }
+}
+
+}  // namespace
+
+CompareOutcome CompareDirectories(IFileProvider& leftProvider, const std::wstring& left, IFileProvider& rightProvider,
+                                  const std::wstring& right, const CompareOptions& options,
+                                  const SearchCancelPoll& cancelPoll, const CompareProgressCallback& onProgress) {
+    CompareOutcome out;
+    Listing leftListing, rightListing;
+    out.leftListed = ListProvider(leftProvider, left, options.includeHiddenLeft, options.fileMaskLeft, cancelPoll,
+                                  leftListing);
+    out.rightListed = ListProvider(rightProvider, right, options.includeHiddenRight, options.fileMaskRight, cancelPoll,
+                                   rightListing);
+    if (!out.leftListed || !out.rightListed) return out;
+    Context ctx{options, cancelPoll, onProgress, out};
+    ctx.list = [&](bool leftSide, const fs::path& rel, Listing& listing) {
+        return leftSide ? ListProvider(leftProvider, JoinProviderRelative(leftProvider, left, rel),
+                                       options.includeHiddenLeft, options.fileMaskLeft, cancelPoll, listing)
+                        : ListProvider(rightProvider, JoinProviderRelative(rightProvider, right, rel),
+                                       options.includeHiddenRight, options.fileMaskRight, cancelPoll, listing);
+    };
+    ctx.content = [&](const fs::path& rel, bool* cancelled, const std::function<void()>& onChunk) {
+        return ProviderContentEqual(leftProvider, JoinProviderRelative(leftProvider, left, rel), rightProvider,
+                                    JoinProviderRelative(rightProvider, right, rel), cancelPoll, &out.bytesRead,
+                                    cancelled, onChunk);
+    };
     CompareLevel(ctx, fs::path(), 0, leftListing, rightListing);
     return out;
 }

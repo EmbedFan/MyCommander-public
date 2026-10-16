@@ -97,6 +97,10 @@ private:
     // reads the final reply. On cancel: ABOR, drain, Status::Cancelled.
     Status Transfer(const std::string& command, const std::function<Status(SOCKET)>& body, const CancelFn& cancel,
                     std::wstring& error);
+    // Reads the server's answer(s) to ABOR so the next command's reply isn't
+    // one behind: usually two (the transfer's 426, or 226 if it had already
+    // finished, then the ABOR's 226/225), sometimes one.
+    void DrainAfterAbort();
     std::string Encode(const std::wstring& path) const { return EncodeName(path, utf8_); }
 };
 

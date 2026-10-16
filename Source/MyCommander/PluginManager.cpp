@@ -3,6 +3,9 @@
 #include "Dialog.h"
 #include "MenuBar.h"
 #include "PathUtil.h"
+#include "PauseToken.h"
+#include "PluginProviderAdapter.h"
+#include "Strings.h"
 #include "Utf8TextFile.h"
 #include "Viewer.h"
 
@@ -314,6 +317,29 @@ void __stdcall ThunkEndProgress() {
 bool __stdcall ThunkPollCancel() {
     return g_activeManager && g_activeManager->HostPollCancel();
 }
+bool __stdcall ThunkWaitWhilePaused() {
+    return !g_activeManager || g_activeManager->HostWaitWhilePaused();
+}
+bool __stdcall ThunkOpenProvider(McPanelSide side, const McFsProvider* provider, const wchar_t* startPath,
+                                 const wchar_t* returnSelectName) {
+    return g_activeManager && g_activeManager->HostOpenProvider(side, provider, startPath, returnSelectName);
+}
+bool __stdcall ThunkCloseProvider(McPanelSide side) {
+    return g_activeManager && g_activeManager->HostCloseProvider(side);
+}
+void* __stdcall ThunkGetPanelProvider(McPanelSide side) {
+    return g_activeManager ? g_activeManager->HostGetPanelProvider(side) : nullptr;
+}
+bool __stdcall ThunkIsPanelInProvider(McPanelSide side) {
+    return g_activeManager && g_activeManager->HostIsPanelInProvider(side);
+}
+bool __stdcall ThunkNavigatePanel(McPanelSide side, const wchar_t* path) {
+    return g_activeManager && g_activeManager->HostNavigatePanel(side, path);
+}
+bool __stdcall ThunkGetPanelProviderPath(McPanelSide side, wchar_t* outBuffer, int outBufferSize) {
+    if (!g_activeManager || !outBuffer || outBufferSize <= 0) return false;
+    return g_activeManager->HostGetPanelProviderPath(side, outBuffer, outBufferSize);
+}
 
 }  // namespace
 
@@ -482,6 +508,7 @@ void PluginManager::DiscoverAndLoad(const std::filesystem::path& pluginsDir, con
         plugin->id = id;
         plugin->name = name;
         plugin->version = info->version ? info->version : L"";
+        plugin->apiMinor = info->apiVersionMinor;
         plugin->module = module;
         plugin->state = kMcPluginValidated;
 
@@ -547,6 +574,7 @@ void PluginManager::DiscoverAndLoad(const std::filesystem::path& pluginsDir, con
                 plugin->renderViewFn = nullptr;
             }
         }
+        plugin->fileSystem = (info->capabilities & kMcPluginCapFileSystem) != 0;
         plugin->onThemeChangedFn =
             reinterpret_cast<McPlugin_OnThemeChangedFn>(GetProcAddress(module, "McPlugin_OnThemeChanged"));
         plugin->shutdownFn = reinterpret_cast<McPlugin_ShutdownFn>(GetProcAddress(module, "McPlugin_Shutdown"));
@@ -566,6 +594,10 @@ void PluginManager::DiscoverAndLoad(const std::filesystem::path& pluginsDir, con
             &ThunkShowFileViewer,
             &ThunkBeginProgress, &ThunkUpdateProgress, &ThunkEndProgress,
             &ThunkPollCancel,
+            &ThunkWaitWhilePaused,
+            &ThunkOpenProvider, &ThunkCloseProvider, &ThunkGetPanelProvider, &ThunkGetPanelProviderPath,
+            &ThunkIsPanelInProvider,
+            &ThunkNavigatePanel,
         };
 
         bool initOk = true;
@@ -613,6 +645,7 @@ void PluginManager::Shutdown() {
         // Phase 3, §8/§14: same host-owns-cleanup rule extended to panel
         // content and published services.
         ReleasePanelContentOwnedBy(plugin.id);
+        ReleaseProvidersOwnedBy(plugin.id);
         UnpublishServicesOwnedBy(plugin.id);
 
         if (plugin.shutdownFn) {
@@ -1072,7 +1105,38 @@ void PluginManager::HostEndProgress() {
 }
 bool PluginManager::HostPollCancel() {
     if (!console_) return false;
-    return PollAndConsumeEscape(*console_);
+    // FOP-015: P toggles the shared pause, but only for a plugin that can act on it
+    // (API >= 1.11 and so able to call WaitWhilePaused); for any other plugin the
+    // key is swallowed, as every non-Esc key always was.
+    ProgressKeys keys = PollProgressKeys(*console_);
+    if (pause_) {
+        if (keys.cancel) {
+            pause_->Resume();
+        } else if (keys.togglePause) {
+            const LoadedPlugin* plugin = FindPlugin(currentPluginId_);
+            if (plugin && plugin->apiMinor >= 11) pause_->Toggle();
+        }
+    }
+    return keys.cancel;
+}
+
+bool PluginManager::HostWaitWhilePaused() {
+    if (!console_ || !pause_ || !pause_->Paused()) return true;
+    AnimatedProgressDialog* box = AnimatedProgressDialog::Current();
+    if (box) box->SetUserPaused(true);
+    bool cancelled = false;
+    pause_->WaitWhilePaused([&]() {
+        ProgressKeys keys = PollProgressKeys(*console_);
+        if (keys.cancel) {
+            cancelled = true;
+            return true;
+        }
+        if (keys.togglePause) pause_->Resume();
+        return false;
+    });
+    pause_->Resume();
+    if (box) box->SetUserPaused(false);
+    return !cancelled;
 }
 
 void PluginManager::HostSimulateKeyImpl(uint16_t virtualKeyCode, bool ctrl, bool shift, bool alt) {
@@ -1112,6 +1176,8 @@ bool PluginManager::HostRequestPanelContent(McPanelSide side, const wchar_t* tit
     if (!panel) return false;
     size_t sideIndex = side == kMcPanelLeft ? 0 : 1;
     if (!panelContentOwner_[sideIndex].empty() && panelContentOwner_[sideIndex] != currentPluginId_) return false;
+    // FEA-0010: a view the host itself installed (the directory tree) is not replaced behind its back.
+    if (panelContentOwner_[sideIndex].empty() && panel->Content() != nullptr) return false;
 
     LoadedPlugin* plugin = FindPlugin(currentPluginId_);
     if (!plugin || !plugin->onPanelDrawFn || !plugin->onPanelKeyFn || !plugin->onPanelClickFn) return false;
@@ -1300,6 +1366,121 @@ void PluginManager::HostRefreshPanel(McPanelSide side) {
     // single-panel refresh.
     Panel* other = PanelForSide(side == kMcPanelLeft ? kMcPanelRight : kMcPanelLeft);
     if (other && PathsEquivalent(panel->Path(), other->Path())) other->Refresh();
+}
+
+// --- API 1.12 (EXT-002): file-system providers -----------------------------
+
+PluginProviderAdapter* PluginManager::OwnedProvider(McPanelSide side, const std::wstring& pluginId) {
+    Panel* panel = PanelForSide(side);
+    if (!panel || !panel->InProvider()) return nullptr;
+    auto* adapter = dynamic_cast<PluginProviderAdapter*>(panel->Provider());
+    return adapter && adapter->OwnerId() == pluginId ? adapter : nullptr;
+}
+
+bool PluginManager::HostOpenProvider(McPanelSide side, const McFsProvider* table, const wchar_t* startPath,
+                                     const wchar_t* returnSelectName) {
+    if (currentPluginId_.empty() || !table) return false;
+    const std::wstring owner = currentPluginId_;
+    LoadedPlugin* plugin = FindPlugin(owner);
+    Panel* panel = PanelForSide(side);
+    if (!plugin || !panel) return false;
+    if (!plugin->fileSystem) {
+        if (logger_) logger_->Log(LogLevel::Warning, L"Plugin \"" + owner + L"\": OpenProvider needs kMcPluginCapFileSystem");
+        return false;
+    }
+    std::wstring problem;
+    if (!PluginProviderAdapter::Validate(*table, problem)) {
+        if (logger_) logger_->Log(LogLevel::Warning, L"Plugin \"" + owner + L"\": invalid McFsProvider: " + problem);
+        return false;
+    }
+    size_t sideIndex = side == kMcPanelLeft ? 0 : 1;
+    if (!panelContentOwner_[sideIndex].empty()) {
+        if (panelContentOwner_[sideIndex] != owner) return false;
+        panel->SetContent(nullptr);  // the plugin's own panel content gives way to its provider
+        panelAdapters_[sideIndex].reset();
+        panelContentOwner_[sideIndex].clear();
+    }
+    if (panel->InProvider() && !panel->CloseProvider(false)) return false;
+
+    auto scope = [this, owner](bool entering) {
+        if (entering) {
+            scopeStack_.push_back(currentPluginId_);
+            currentPluginId_ = owner;
+        } else if (!scopeStack_.empty()) {
+            currentPluginId_ = scopeStack_.back();
+            scopeStack_.pop_back();
+        }
+    };
+    auto crash = [this, owner](const std::wstring& what) {
+        if (logger_) logger_->Log(LogLevel::Error, L"Plugin \"" + owner + L"\": " + what);
+    };
+    auto adapter = std::make_shared<PluginProviderAdapter>(*table, owner, scope, crash);
+    std::wstring start = startPath && *startPath ? std::wstring(startPath) : std::wstring(table->rootPath);
+    // Listing happens right here, re-entering the plugin from inside its own
+    // OpenProvider call -- allowed (single-threaded); the table must be ready.
+    panel->OpenProvider(adapter, start, returnSelectName ? returnSelectName : L"",
+                        [this](IFileProvider& provider) { return ConfirmLeaveProvider(provider); });
+    return true;
+}
+
+bool PluginManager::HostCloseProvider(McPanelSide side) {
+    Panel* panel = PanelForSide(side);
+    PluginProviderAdapter* adapter = OwnedProvider(side, currentPluginId_);
+    if (!panel || !adapter) return false;
+    // The plugin's own explicit command (Disconnect, ...) needs no "Leave?"
+    // question -- only unsaved changes are worth asking about.
+    return panel->CloseProvider(/*force=*/!adapter->HasPendingChanges());
+}
+
+void* PluginManager::HostGetPanelProvider(McPanelSide side) {
+    PluginProviderAdapter* adapter = OwnedProvider(side, currentPluginId_);
+    return adapter ? adapter->Context() : nullptr;
+}
+
+bool PluginManager::HostGetPanelProviderPath(McPanelSide side, wchar_t* outBuffer, int outBufferSize) {
+    if (!OwnedProvider(side, currentPluginId_)) return false;
+    CopyTruncated(PanelForSide(side)->ProviderPath(), outBuffer, outBufferSize);
+    return true;
+}
+
+bool PluginManager::HostIsPanelInProvider(McPanelSide side) {
+    Panel* panel = PanelForSide(side);
+    return panel && panel->InProvider();
+}
+
+bool PluginManager::HostNavigatePanel(McPanelSide side, const wchar_t* path) {
+    Panel* panel = PanelForSide(side);
+    if (!panel || !path || !*path) return false;
+    if (!CanNavigatePanel(panel->Content() != nullptr, panel->InProvider())) return false;
+    panel->NavigateTo(std::filesystem::path(path));
+    return true;
+}
+
+bool PluginManager::ConfirmLeaveProvider(IFileProvider& provider) {
+    if (!console_) return true;
+    std::function<void()> redraw = redrawBackground_ ? redrawBackground_ : [] {};
+    if (!provider.HasPendingChanges()) {
+        if (!provider.AsksBeforeLeaving()) return true;
+        int leave = ShowChoiceDialog(*console_, kStrProviderLeaveTitle, {kStrProviderLeaveQuestion + provider.DisplayRoot() + L"?"},
+                                     {{L'Y', kStrYesLabel}, {L'N', kStrNoLabel}}, redraw);
+        return leave == 0;
+    }
+    int choice = ShowChoiceDialog(*console_, kStrProviderSaveTitle, {provider.DisplayRoot(), kStrProviderSaveQuestion},
+                                  {{L'S', kStrSaveLabel}, {L'D', kStrDiscardLabel}, {L'C', kStrCancelLabel}}, redraw);
+    if (choice == 1) return true;
+    if (choice != 0) return false;
+    std::wstring error;
+    ProviderStatus status = provider.Commit({}, error);
+    if (status == ProviderStatus::Ok) return true;
+    ShowMessage(*console_, kStrProviderSaveFailedTitle,
+                {provider.DisplayRoot(), error.empty() ? std::wstring(ProviderStatusText(status)) : error}, redraw);
+    return false;
+}
+
+void PluginManager::ReleaseProvidersOwnedBy(const std::wstring& pluginId) {
+    for (McPanelSide side : {kMcPanelLeft, kMcPanelRight}) {
+        if (OwnedProvider(side, pluginId)) PanelForSide(side)->CloseProvider(true);
+    }
 }
 
 }  // namespace mc

@@ -192,14 +192,14 @@ extern "C" __declspec(dllexport) const McPluginMetadata* __stdcall McPlugin_GetI
     static const McPluginMetadata info = {
         sizeof(McPluginMetadata),
         MC_PLUGIN_API_VERSION_MAJOR,
-        MC_PLUGIN_API_VERSION_MINOR,  // 1.9: needs kMcFormFieldPassword
+        MC_PLUGIN_API_VERSION_MINOR,  // 1.12: file-system providers (EXT-002)
         MC_PLUGIN_MAGIC,
         L"com.mycommander.ftpplugin",
         L"FTP",
         L"FTP client: browse, download and upload files on FTP servers in a panel.",
         MCPLUGIN_VERSION_WSTR,
         L"MyCommander project",
-        kMcPluginCapMenu | kMcPluginCapPanel | kMcPluginCapHelp,
+        kMcPluginCapMenu | kMcPluginCapFileSystem | kMcPluginCapHelp,
     };
     return &info;
 }
@@ -219,45 +219,23 @@ extern "C" __declspec(dllexport) bool __stdcall McPlugin_Init(const McPluginHost
 extern "C" __declspec(dllexport) void __stdcall McPlugin_Shutdown(void) { remote::PanelShutdown(); }
 
 extern "C" __declspec(dllexport) const wchar_t* __stdcall McPlugin_GetHelpMarkdown(void) {
-    return L"# FTP panel\n"
+    return L"# FTP\n"
            L"- Network > FTP connection: connect to, edit, delete or add a saved connection\n"
            L"- Network > New FTP connection: connect (host, or a ftp://user@host:port/folder address)\n"
            L"- Network > Disconnect FTP (shown while connected): disconnect the active panel's server\n"
            L"- Plain FTP sends the password unencrypted; use it for public or test servers\n"
-           L"- Enter: open a folder, or view a file; Backspace / `..`: parent folder (at the root: disconnect)\n"
-           L"- F3: view the current file\n"
-           L"- F5 / F6: download (copy / move) the selection to the other panel's folder\n"
-           L"- F5 in the other panel: upload its selection into the current server folder\n"
-           L"- F7: create a folder; F2: rename; F8 / Delete: delete (always asks; there is no Recycle Bin)\n"
-           L"- Ctrl+R: re-read the folder; Esc: cancel a running transfer\n"
-           L"- Insert, Shift+Up/Down, Num+ / Num- / Num*, Ctrl+Num+ / Ctrl+Num-, right-click: selection\n"
+           L"- The server is shown in the panel itself: sorting (Ctrl+F3..F6), the quick filter (Ctrl+F), Brief view,\n"
+           L"  selection and every file key work there as on a local folder\n"
+           L"- Enter: open a folder, or view a file; `..` at the top folder: disconnect\n"
+           L"- F3: view; F5 / F6: copy / move to the other panel -- a local folder, an archive or another\n"
+           L"  server (FTP <-> SFTP goes through a temporary local copy); F5 / F6 in the other panel: upload\n"
+           L"- F7: create a folder; Shift+F7: new empty file; F2: rename; F8: delete (asks first, as set in\n"
+           L"  the settings; there is no Recycle Bin); Ctrl+R: re-read the folder; Esc: cancel; P: pause\n"
+           L"- An upload goes to a temporary name first and replaces the old file only when complete\n"
            L"- Saved passwords are kept only in the Windows Credential Manager, never in a file or the log;\n"
            L"  every password prompt offers \"Save the password (Windows Credential Manager)\"\n";
 }
 
 extern "C" __declspec(dllexport) void __stdcall McPlugin_OnMenuAction(uint32_t commandId) {
     remote::OnMenuAction(commandId);
-}
-
-extern "C" __declspec(dllexport) bool __stdcall McPlugin_OnReceiveFiles(McPanelSide side, McPanelSide sourceSide) {
-    return remote::OnReceiveFiles(side, sourceSide);
-}
-
-extern "C" __declspec(dllexport) void __stdcall McPlugin_OnPanelDraw(McPanelSide side, uint16_t width, uint16_t height,
-                                                                    bool active) {
-    remote::Draw(side, width, height, active);
-}
-
-extern "C" __declspec(dllexport) void __stdcall McPlugin_OnPanelKey(McPanelSide side, uint16_t key, uint32_t control) {
-    remote::HandleKey(side, key, control);
-}
-
-extern "C" __declspec(dllexport) void __stdcall McPlugin_OnPanelClick(McPanelSide side, int16_t x, int16_t y,
-                                                                     bool doubleClick) {
-    remote::HandleMouse(side, x, y, FROM_LEFT_1ST_BUTTON_PRESSED, doubleClick ? DOUBLE_CLICK : 0, 0);
-}
-
-extern "C" __declspec(dllexport) void __stdcall McPlugin_OnPanelMouse(McPanelSide side, int16_t x, int16_t y,
-                                                                     uint32_t buttons, uint32_t flags, uint32_t control) {
-    remote::HandleMouse(side, x, y, buttons, flags, control);
 }

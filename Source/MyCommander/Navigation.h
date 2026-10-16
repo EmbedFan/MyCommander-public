@@ -119,4 +119,35 @@ struct ClickableRegion {
 // (mouseX, mouseY), or -1 if none matches.
 int MatchClickRegion(const std::vector<ClickableRegion>& regions, SHORT mouseX, SHORT mouseY);
 
+// UI-017: Brief (names-only, multi-column) panel view geometry. `rows` is
+// how many entries one column holds (the panel's visible row count);
+// `columns` is how many of those columns fit across `width` at once -- a
+// screenful is columns*rows entries, column-major (the same fill order
+// Total Commander's own brief view uses: a column fills top to bottom
+// before the next one starts). There is no independent horizontal scroll
+// state: DrawPanel derives which screenful to show directly from the
+// cursor's own index (firstVisible = (cursor / (columns*rows)) *
+// columns*rows), the same way Full view's own TopIndex naturally follows
+// the cursor -- so Left/Right/PgUp/PgDn only need to move the cursor by
+// one column's (`rows`) or one screenful's (`columns*rows`) worth of
+// entries via the existing Panel::MoveCursor, nothing new to persist.
+struct BriefLayout {
+    int columns = 1;
+    int columnWidth = 12;
+};
+
+// `longestNameWidth` is the longest entry name's own display width (UI-011);
+// `width` is the panel's inner content width. Never returns columns < 1 or
+// columnWidth < 12, even for a 0-width/0-entry panel, so callers never need
+// to guard a degenerate layout themselves.
+BriefLayout ComputeBriefLayout(int visibleRows, SHORT width, SHORT longestNameWidth);
+
+// Which entry index sits at (col, row) within the screenful starting at
+// `firstVisible` -- column-major, `rows` entries per column.
+int BriefEntryAt(int firstVisible, int rows, int col, int row);
+
+// The screenful (page) that contains `cursor` -- the first index DrawPanel
+// should start drawing columns from.
+int BriefFirstVisible(int cursor, int columns, int rows);
+
 }  // namespace mc

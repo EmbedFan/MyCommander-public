@@ -470,7 +470,7 @@ struct AnimatedProgressDialog::Impl {
     std::wstring title, message = L"Working...";
     uint64_t completed = 0, total;
     WORD normal = kAttrNormal, body = kAttrBody, heading = kAttrTitle, border = kAttrBorder;
-    bool ascii, stopping = false, paused = false;
+    bool ascii, stopping = false, paused = false, userPaused = false;
     SMALL_RECT area{};
     COORD size{};
     std::vector<CHAR_INFO> background;
@@ -535,12 +535,14 @@ struct AnimatedProgressDialog::Impl {
             put(left, top + row, std::wstring(1, vertical), border);
             put(left + width - 1, top + row, std::wstring(1, vertical), border);
         }
-        put(left + 1, top + 1, CenterToDisplayWidth(title, width - 2), heading);
+        put(left + 1, top + 1, CenterToDisplayWidth(userPaused ? title + L" [paused]" : title, width - 2), heading);
         const auto tick = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now().time_since_epoch()).count() / 250;
         const wchar_t frames[] = {L'|', L'/', L'-', L'\\'};
         std::wstring counter = total ? std::to_wstring(std::min(completed, total)) + L"/" + std::to_wstring(total) + L" items" : L"Working...";
-        put(left + 2, top + 3, PadToDisplayWidth(L"[" + std::wstring(1, frames[tick % 4]) + L"] " + counter, width - 4), body);
+        // A paused box doesn't spin: the frozen "[=]" makes the state obvious at a glance.
+        const wchar_t spinner = userPaused ? L'=' : frames[tick % 4];
+        put(left + 2, top + 3, PadToDisplayWidth(L"[" + std::wstring(1, spinner) + L"] " + counter, width - 4), body);
         for (int row = 0; row < static_cast<int>(lines.size()) && row + 4 < height - 1; ++row)
             put(left + 2, top + 4 + row, PadToDisplayWidth(lines[row], width - 4), body);
         SMALL_RECT writeArea = area;
@@ -601,6 +603,12 @@ AnimatedProgressDialog::~AnimatedProgressDialog() {
 void AnimatedProgressDialog::Update(uint64_t completed, uint64_t total, const std::wstring& message) {
     std::lock_guard<std::mutex> lock(impl_->mutex);
     impl_->completed = completed; impl_->total = total; impl_->message = message;
+}
+void AnimatedProgressDialog::SetUserPaused(bool paused) {
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+    if (impl_->userPaused == paused) return;
+    impl_->userPaused = paused;
+    if (!impl_->paused && !impl_->stopping) impl_->Paint();  // show the change at once, not at the next tick
 }
 void AnimatedProgressDialog::Pause() {
     std::lock_guard<std::mutex> lock(impl_->mutex);

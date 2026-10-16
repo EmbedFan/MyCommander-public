@@ -218,6 +218,11 @@ public:
     void Update(uint64_t completed, uint64_t total, const std::wstring& message);
     void Pause();
     void Resume();
+    // FOP-015: the *user* paused the operation behind this box (P). Only the
+    // rendering changes: "[paused]" in the title and a resume/cancel hint.
+    // Distinct from Pause()/Resume(), which suspend the renderer while an
+    // ordinary modal dialog is drawn over it.
+    void SetUserPaused(bool paused);
     static AnimatedProgressDialog* Current();
 private:
     struct Impl;

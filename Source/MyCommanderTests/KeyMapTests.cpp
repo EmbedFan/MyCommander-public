@@ -293,3 +293,57 @@ TEST_CASE(KeyMap_CompareFiles_DefaultAltF3_SRC008) {
     CHECK(d.KeysFor(CommandId::CompareFiles) == std::vector<KeyChord>{K(VK_F3, false, false, true)});
     CHECK(d.CommandFor(K(VK_F3, false, false, true)) == std::optional<CommandId>(CommandId::CompareFiles));
 }
+
+TEST_CASE(KeyMap_CtrlUIsSwapPanels_NAV016) {
+    KeyMap m = KeyMap::Defaults();
+    CHECK(m.CommandFor(K('U', true)) == std::optional<CommandId>(CommandId::SwapPanels));
+    CHECK(!m.CommandFor(K('U')).has_value());  // a plain U is typed text
+}
+
+TEST_CASE(KeyMap_AltF12IsRecentFolders_NAV017) {
+    KeyMap m = KeyMap::Defaults();
+    CHECK(m.CommandFor(K(VK_F12, false, false, true)) == std::optional<CommandId>(CommandId::RecentFolders));
+    CHECK(!m.CommandFor(K(VK_F12)).has_value());
+}
+
+TEST_CASE(KeyMap_CtrlLCyclesLabelAndCtrlShiftLOpensTheMenu_LIST009) {
+    KeyMap m = KeyMap::Defaults();
+    CHECK(m.CommandFor(K('L', true)) == std::optional<CommandId>(CommandId::CycleLabel));
+    CHECK(m.CommandFor(K('L', true, true)) == std::optional<CommandId>(CommandId::LabelMenu));
+    CHECK(!m.CommandFor(K('L')).has_value());  // a plain L is typed text
+}
+
+TEST_CASE(KeyMap_CtrlZIsUndo_FOP022) {
+    KeyMap m = KeyMap::Defaults();
+    CHECK(m.CommandFor(K('Z', true)) == std::optional<CommandId>(CommandId::Undo));
+}
+
+TEST_CASE(KeyMap_CtrlF12IsLargestFiles_SRC010) {
+    KeyMap m = KeyMap::Defaults();
+    CHECK(m.CommandFor(K(VK_F12, true)) == std::optional<CommandId>(CommandId::LargestFiles));
+    CHECK(m.CommandFor(K(VK_F12, false, false, true)) == std::optional<CommandId>(CommandId::RecentFolders));
+}
+
+TEST_CASE(KeyMap_AltShiftVIsPasteFromExplorer_FOP025) {
+    KeyMap m = KeyMap::Defaults();
+    CHECK(m.CommandFor(K('V', false, true, true)) == std::optional<CommandId>(CommandId::PasteFromExplorer));
+}
+
+TEST_CASE(KeyMap_AltRIsReverseSearch_CLI008) {
+    KeyMap m = KeyMap::Defaults();
+    CHECK(m.CommandFor(K('R', false, false, true)) == std::optional<CommandId>(CommandId::ReverseSearch));
+    CHECK(!IsMenuChord(K('R', false, false, true)));  // not a menu mnemonic
+    CHECK(m.CommandFor(K('R', true, false, false)) == std::optional<CommandId>(CommandId::Refresh));  // Ctrl+R unchanged
+}
+
+TEST_CASE(KeyMap_CtrlF9IsSortAttributes_LIST011) {
+    KeyMap m = KeyMap::Defaults();
+    CHECK(m.CommandFor(K(VK_F9, true)) == std::optional<CommandId>(CommandId::SortAttributes));
+    CHECK(m.CommandFor(K(VK_F9)) != std::optional<CommandId>(CommandId::SortAttributes));
+}
+
+TEST_CASE(KeyMap_CtrlSpaceIsCompletePath_TabUnchanged_NAV018) {
+    KeyMap m = KeyMap::Defaults();
+    CHECK(m.CommandFor(K(VK_SPACE, true)) == std::optional<CommandId>(CommandId::CompletePath));
+    CHECK(m.CommandFor(K(VK_TAB)) != std::optional<CommandId>(CommandId::CompletePath));
+}

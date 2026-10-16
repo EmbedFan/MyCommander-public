@@ -33,9 +33,6 @@ std::wstring FormatPanelTitle(const std::wstring& scheme, uint16_t defaultPort, 
 // "1.2 MB"-style size for the panel's size column.
 std::wstring FormatSize(uint64_t bytes);
 
-// "2026-10-08 14:05" (local time) from FILETIME ticks; empty for 0.
-std::wstring FormatTime(uint64_t fileTimeUtc);
-
 // Case-insensitive '*' / '?' match for Num+ / Num- selection masks.
 bool WildcardMatch(const wchar_t* name, const wchar_t* pattern);
 

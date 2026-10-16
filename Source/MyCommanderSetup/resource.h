@@ -10,3 +10,6 @@
 #define IDR_PAYLOAD_ZIPPLUGIN 104
 #define IDR_PAYLOAD_FTPPLUGIN 105  // EXT-005 / FTP-012
 #define IDR_PAYLOAD_SFTPPLUGIN 106  // EXT-004 / SFTP-010
+#define IDR_PAYLOAD_NETINFOPLUGIN 108  // FEA-0010
+#define IDR_PAYLOAD_ICON 107        // IS-0021: mycommander.ico, installed beside MyCommander.exe
+#define IDI_APPICON 1               // IS-0021: the installer's own icon resource

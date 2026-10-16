@@ -298,3 +298,50 @@ TEST_CASE(FormatOtherPanelLabel_FitsTruncatesAndGivesUp_UI013) {
     CHECK(!wide.empty() && mc::StringDisplayWidth(wide) <= 30);  // full-width characters count double (UI-011)
     CHECK(mc::FormatOtherPanelLabel(L"D:\\Backup", 18).empty());  // no room: no label
 }
+
+// --- UI-017: Brief view geometry --------------------------------------------
+
+TEST_CASE(ComputeBriefLayout_NarrowNames_ClampsColumnWidthToTwelve_UI017) {
+    mc::BriefLayout layout = mc::ComputeBriefLayout(10, 100, 5);
+    CHECK(layout.columnWidth == 12);
+    CHECK(layout.columns == 100 / 12);
+}
+
+TEST_CASE(ComputeBriefLayout_LongNames_ClampsColumnWidthToHalfTheWidth_UI017) {
+    mc::BriefLayout layout = mc::ComputeBriefLayout(10, 80, 90);
+    CHECK(layout.columnWidth == 40);  // 80/2, since 90 would exceed half the panel's width
+    CHECK(layout.columns == 2);
+}
+
+TEST_CASE(ComputeBriefLayout_MediumNames_UsesTheNameWidthDirectly_UI017) {
+    mc::BriefLayout layout = mc::ComputeBriefLayout(10, 100, 20);
+    CHECK(layout.columnWidth == 20);
+    CHECK(layout.columns == 5);
+}
+
+TEST_CASE(ComputeBriefLayout_NeverDegeneratesOnZeroWidth_UI017) {
+    mc::BriefLayout layout = mc::ComputeBriefLayout(10, 0, 0);
+    CHECK(layout.columns >= 1);
+    CHECK(layout.columnWidth >= 12);
+}
+
+TEST_CASE(BriefEntryAt_IsColumnMajor_UI017) {
+    // 3 rows per column: column 0 is indices 0,1,2; column 1 is 3,4,5; ...
+    CHECK(mc::BriefEntryAt(0, 3, 0, 0) == 0);
+    CHECK(mc::BriefEntryAt(0, 3, 0, 2) == 2);
+    CHECK(mc::BriefEntryAt(0, 3, 1, 0) == 3);
+    CHECK(mc::BriefEntryAt(0, 3, 2, 1) == 7);
+}
+
+TEST_CASE(BriefEntryAt_OffsetsByFirstVisible_UI017) {
+    CHECK(mc::BriefEntryAt(30, 3, 1, 1) == 30 + 3 + 1);
+}
+
+TEST_CASE(BriefFirstVisible_SnapsDownToThePageContainingTheCursor_UI017) {
+    // 2 columns x 3 rows = a 6-entry page.
+    CHECK(mc::BriefFirstVisible(0, 2, 3) == 0);
+    CHECK(mc::BriefFirstVisible(5, 2, 3) == 0);
+    CHECK(mc::BriefFirstVisible(6, 2, 3) == 6);
+    CHECK(mc::BriefFirstVisible(11, 2, 3) == 6);
+    CHECK(mc::BriefFirstVisible(12, 2, 3) == 12);
+}

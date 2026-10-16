@@ -20,6 +20,16 @@ IDR_PAYLOAD_FTPPLUGIN   RCDATA "payload\\FtpPlugin.dll"
 // EXT-004 / SFTP-010: the SFTP plugin, staged the same way.
 IDR_PAYLOAD_SFTPPLUGIN  RCDATA "payload\\SftpPlugin.dll"
 
+// FEA-0010: the Network Info plugin.
+IDR_PAYLOAD_NETINFOPLUGIN RCDATA "payload\\NetInfoPlugin.dll"
+
+// IS-0021: the application icon, twice. As the installer's own icon (Explorer shows it for MyCommanderSetup.exe,
+// which is also kept as the uninstaller), and as a payload the installer writes beside MyCommander.exe as
+// mycommander.ico, so a Windows Terminal profile (and any shortcut the user makes) can point at it. Referenced
+// straight from Resources\, not staged through payload\ -- it is a committed asset, not a build output.
+IDI_APPICON ICON "..\\..\\Resources\\mycommander.ico"
+IDR_PAYLOAD_ICON RCDATA "..\\..\\Resources\\mycommander.ico"
+
 VS_VERSION_INFO VERSIONINFO
  FILEVERSION MC_VERSION_MAJOR,MC_VERSION_MINOR,MC_VERSION_PATCH,MC_VERSION_BUILD
  PRODUCTVERSION MC_VERSION_MAJOR,MC_VERSION_MINOR,MC_VERSION_PATCH,MC_VERSION_BUILD

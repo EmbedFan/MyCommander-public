@@ -17,6 +17,8 @@
 
 #include "../MyCommander/PathUtil.h"
 #include "../MyCommander/Process.h"
+#include "../MyCommander/Shortcut.h"
+#include "../MyCommander/Utf8TextFile.h"
 #include "../MyCommander/Version.h"
 
 #ifndef NOMINMAX
@@ -189,31 +191,26 @@ DWORD ComputeInstalledSizeKB(const fs::path& dir) {
     return static_cast<DWORD>(totalBytes / 1024);
 }
 
-// FEA-0006 Sec 6: created via IShellLinkW/IPersistFile - the same two COM
-// interfaces main.cpp's own drag-and-drop/elevation code already links
-// shell32/ole32 for. No app icon exists yet (flagged in the feature plan),
-// so the shortcut shows MyCommander.exe's own default icon for now.
+// FEA-0006 Sec 6 / FOP-026: the shortcut itself is written by the shared mc::CreateShortcutFile (the one
+// IShellLinkW/IPersistFile home). It sets no icon of its own: the shell shows the target's, which since IS-0021 is
+// MyCommander.exe's embedded application icon (the executable is fully written before this runs).
 bool CreateDesktopShortcut(const fs::path& targetExe, const fs::path& workingDir) {
     std::wstring desktop = GetKnownFolder(FOLDERID_Desktop);
     if (desktop.empty()) return false;
     fs::path linkPath = fs::path(desktop) / kShortcutName;
+    return mc::CreateShortcutFile(linkPath, targetExe, workingDir, L"MyCommander - Terminal File Commander").empty();
+}
 
-    bool ok = false;
-    IShellLinkW* shellLink = nullptr;
-    if (SUCCEEDED(CoCreateInstance(CLSID_ShellLink, nullptr, CLSCTX_INPROC_SERVER, IID_IShellLinkW,
-                                    reinterpret_cast<void**>(&shellLink)))) {
-        shellLink->SetPath(targetExe.c_str());
-        shellLink->SetWorkingDirectory(workingDir.c_str());
-        shellLink->SetDescription(L"MyCommander - Terminal File Commander");
-
-        IPersistFile* persistFile = nullptr;
-        if (SUCCEEDED(shellLink->QueryInterface(IID_IPersistFile, reinterpret_cast<void**>(&persistFile)))) {
-            ok = SUCCEEDED(persistFile->Save(linkPath.c_str(), TRUE));
-            persistFile->Release();
-        }
-        shellLink->Release();
-    }
-    return ok;
+// IS-0021: writes the Windows Terminal profile fragment (a per-user JSON file giving MyCommander its own profile and
+// icon in the terminal). False if the folder or the file can't be written; nothing else depends on it.
+bool WriteTerminalFragment(const fs::path& exePath, const fs::path& iconPath) {
+    std::wstring localAppData = GetKnownFolder(FOLDERID_LocalAppData);
+    if (localAppData.empty()) return false;
+    std::error_code ec;
+    fs::create_directories(mc::TerminalFragmentFolder(localAppData), ec);
+    if (ec) return false;
+    return mc::WriteUtf8TextFileAtomic(mc::TerminalFragmentPath(localAppData),
+                                       mc::BuildTerminalFragmentJson(exePath.wstring(), iconPath.wstring()));
 }
 
 struct PrereqResult {
@@ -301,6 +298,17 @@ int RunInstall() {
     if (!ExtractResourceToFile(IDR_PAYLOAD_SFTPPLUGIN, fs::path(installPath) / L"Plugins" / L"SftpPlugin.dll")) {
         SayError(L"Warning: could not install the SFTP plugin -- MyCommander will still work without it.\n");
     }
+    // FEA-0010: the Network Info plugin, with the same warning-only policy.
+    if (!ExtractResourceToFile(IDR_PAYLOAD_NETINFOPLUGIN, fs::path(installPath) / L"Plugins" / L"NetInfoPlugin.dll")) {
+        SayError(L"Warning: could not install the Network Info plugin -- MyCommander will still work without it.\n");
+    }
+    // IS-0021: the application icon as a standalone file (a Windows Terminal profile, or a shortcut the user makes
+    // by hand, can point at it). Warning-only, like the plugins: the executable carries its own icon regardless.
+    const fs::path installedIcon = fs::path(installPath) / L"mycommander.ico";
+    const bool iconInstalled = ExtractResourceToFile(IDR_PAYLOAD_ICON, installedIcon);
+    if (!iconInstalled) {
+        SayError(L"Warning: could not install mycommander.ico.\n");
+    }
 
     // Reused as the uninstaller (see RunUninstall/BuildUninstallInfo) -
     // Apps & Features' UninstallString must point at something that still
@@ -317,6 +325,17 @@ int RunInstall() {
         }
     }
 
+    // IS-0021: a terminal takes its tab and taskbar icon from its profile, never from the program it runs, so
+    // offer a Windows Terminal profile that carries the MyCommander icon.
+    if (iconInstalled) {
+        std::wstring terminalAnswer = PromptLine(L"Add a Windows Terminal profile with the MyCommander icon? [Y/n]: ");
+        if (AnsweredYes(terminalAnswer)) {
+            if (!WriteTerminalFragment(fs::path(installPath) / L"MyCommander.exe", installedIcon)) {
+                SayError(L"Warning: could not add the Windows Terminal profile.\n");
+            }
+        }
+    }
+
     mc::UninstallInfo info =
         mc::BuildUninstallInfo(installPath, kSetupExeName, version, ComputeInstalledSizeKB(installPath));
 
@@ -328,6 +347,7 @@ int RunInstall() {
         WriteRegString(key, L"Publisher", info.publisher);
         WriteRegString(key, L"InstallLocation", info.installLocation);
         WriteRegString(key, L"UninstallString", info.uninstallString);
+        WriteRegString(key, L"DisplayIcon", info.displayIcon);  // IS-0021
         WriteRegDword(key, L"EstimatedSize", info.estimatedSizeKB);
         WriteRegDword(key, L"NoModify", 1);
         WriteRegDword(key, L"NoRepair", 1);
@@ -381,6 +401,14 @@ int RunUninstall() {
     if (!desktop.empty()) {
         std::error_code ec;
         fs::remove(fs::path(desktop) / kShortcutName, ec);
+    }
+
+    // IS-0021: the Windows Terminal profile fragment lives outside the install folder, so it is removed here. Only
+    // the MyCommander folder under Fragments is touched, never Fragments itself.
+    std::wstring localAppData = GetKnownFolder(FOLDERID_LocalAppData);
+    if (!localAppData.empty()) {
+        std::error_code fragmentEc;
+        fs::remove_all(mc::TerminalFragmentFolder(localAppData), fragmentEc);
     }
 
     RegDeleteTreeW(HKEY_CURRENT_USER, kUninstallKeyPath);

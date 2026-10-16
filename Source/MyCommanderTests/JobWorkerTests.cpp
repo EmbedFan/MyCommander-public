@@ -347,3 +347,138 @@ TEST_CASE(JobWorker_UnknownPromptAndJobIdsAreRejected_FOP014) {
     CHECK(!worker.AnswerError(12345, mc::ErrorAskResult{}));
     CHECK(worker.PendingPrompts().empty());
 }
+
+// --- FOP-015: pause and resume -------------------------------------------------
+
+namespace {
+
+// A conflict on the first item parks the worker at a prompt; pausing then makes
+// the job stop at its *next* item once the prompt is answered. That is
+// deterministic, unlike racing a fast copy.
+struct PausedCopy {
+    test::TempDir src;
+    test::TempDir dst;
+    std::vector<fs::path> sources;
+    PausedCopy() {
+        for (const char* n : {"a.txt", "b.txt", "c.txt"}) {
+            test::WriteFileContent(src.Path() / n, "new");
+            sources.push_back(src.Path() / n);
+        }
+        test::WriteFileContent(dst.Path() / L"a.txt", "old");
+    }
+};
+
+bool AnswerSkip(JobWorker& worker) {
+    auto prompts = WaitForPrompts(worker);
+    if (prompts.empty()) return false;
+    ConflictAskResult skip;
+    skip.choice = ConflictChoice::Skip;
+    return worker.AnswerConflict(prompts[0].seq, skip);
+}
+
+}  // namespace
+
+TEST_CASE(JobWorker_PausedJobStopsAtNextItemAndResumes_FOP015) {
+    PausedCopy fx;
+    {
+        JobWorker worker;
+        uint64_t id = worker.Enqueue(CopyJob(fx.sources, fx.dst.Path()));
+        CHECK(!WaitForPrompts(worker).empty());
+        CHECK(worker.Pause(id));
+        CHECK(AnswerSkip(worker));
+        CHECK(WaitUntil([&] { return StateOf(worker, id) == JobState::Paused; }));
+        Sleep(150);
+        CHECK(StateOf(worker, id) == JobState::Paused);  // still parked...
+        CHECK(!fs::exists(fx.dst.Path() / L"b.txt"));    // ...and nothing more was copied
+
+        CHECK(worker.Resume(id));
+        CHECK(WaitUntil([&] { return Finished(worker, id); }));
+        CHECK(StateOf(worker, id) == JobState::Done);
+    }
+    CHECK(fs::exists(fx.dst.Path() / L"b.txt"));
+    CHECK(fs::exists(fx.dst.Path() / L"c.txt"));
+    CHECK(test::ReadFileContent(fx.dst.Path() / L"a.txt") == "old");
+}
+
+TEST_CASE(JobWorker_PausedJobKeepsItsPathsAndBlocksOverlap_FOP015) {
+    PausedCopy fx;
+    {
+        JobWorker worker;
+        uint64_t first = worker.Enqueue(CopyJob(fx.sources, fx.dst.Path()));
+        CHECK(!WaitForPrompts(worker).empty());
+        CHECK(worker.Pause(first));
+        CHECK(AnswerSkip(worker));
+        CHECK(WaitUntil([&] { return StateOf(worker, first) == JobState::Paused; }));
+
+        // A second job on the same sources must keep waiting behind the paused one.
+        test::TempDir other;
+        uint64_t second = worker.Enqueue(CopyJob({fx.sources[1]}, other.Path()));
+        Sleep(150);
+        CHECK(StateOf(worker, second) == JobState::Queued);
+        auto touching = worker.ActiveJobTouching({fx.sources[1]});
+        CHECK(touching.has_value() && touching->id == first);
+
+        CHECK(worker.Resume(first));
+        CHECK(WaitUntil([&] { return Finished(worker, first) && Finished(worker, second); }));
+        CHECK(StateOf(worker, second) == JobState::Done);
+    }
+}
+
+TEST_CASE(JobWorker_CancelWhilePausedEndsTheJob_FOP015) {
+    PausedCopy fx;
+    {
+        JobWorker worker;
+        uint64_t id = worker.Enqueue(CopyJob(fx.sources, fx.dst.Path()));
+        CHECK(!WaitForPrompts(worker).empty());
+        CHECK(worker.Pause(id));
+        CHECK(AnswerSkip(worker));
+        CHECK(WaitUntil([&] { return StateOf(worker, id) == JobState::Paused; }));
+        CHECK(worker.Cancel(id));
+        CHECK(WaitUntil([&] { return Finished(worker, id); }));
+        CHECK(StateOf(worker, id) == JobState::Cancelled);
+    }
+    CHECK(!fs::exists(fx.dst.Path() / L"c.txt"));
+}
+
+TEST_CASE(JobWorker_DestructorDoesNotHangOnAPausedJob_FOP015) {
+    PausedCopy fx;
+    auto start = std::chrono::steady_clock::now();
+    {
+        JobWorker worker;
+        uint64_t id = worker.Enqueue(CopyJob(fx.sources, fx.dst.Path()));
+        CHECK(!WaitForPrompts(worker).empty());
+        CHECK(worker.Pause(id));
+        CHECK(AnswerSkip(worker));
+        CHECK(WaitUntil([&] { return StateOf(worker, id) == JobState::Paused; }));
+    }  // ~JobWorker must cancel the paused job and join
+    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
+    CHECK(ms < 8000);
+}
+
+TEST_CASE(JobWorker_PauseAllAndResumeAll_FOP015) {
+    PausedCopy fx;
+    {
+        JobWorker worker;
+        uint64_t id = worker.Enqueue(CopyJob(fx.sources, fx.dst.Path()));
+        CHECK(!WaitForPrompts(worker).empty());
+        CHECK(worker.PauseAll() == 1);
+        CHECK(worker.PauseAll() == 0);  // already paused: nothing more to do
+        CHECK(AnswerSkip(worker));
+        CHECK(WaitUntil([&] { return StateOf(worker, id) == JobState::Paused; }));
+        CHECK(worker.ResumeAll() == 1);
+        CHECK(WaitUntil([&] { return Finished(worker, id); }));
+        CHECK(StateOf(worker, id) == JobState::Done);
+    }
+}
+
+TEST_CASE(JobWorker_PauseIsRefusedForQueuedOrFinishedJobs_FOP015) {
+    test::TempDir src;
+    test::TempDir dst;
+    test::WriteFileContent(src.Path() / L"a.txt", "x");
+    JobWorker worker;
+    uint64_t id = worker.Enqueue(CopyJob({src.Path() / L"a.txt"}, dst.Path()));
+    CHECK(WaitUntil([&] { return Finished(worker, id); }));
+    CHECK(!worker.Pause(id));    // finished
+    CHECK(!worker.Resume(id));   // not paused
+    CHECK(!worker.Pause(9999));  // unknown
+}

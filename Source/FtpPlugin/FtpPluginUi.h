@@ -21,6 +21,5 @@ inline std::wstring FormatPanelTitle(const std::wstring& user, const std::wstrin
 }
 
 using remote::FormatSize;
-using remote::FormatTime;
 
 }  // namespace ftpui

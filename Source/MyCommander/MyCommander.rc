@@ -1,6 +1,12 @@
 #include <winres.h>
 #include "Version.h"
 
+// IS-0021: the application icon -- one multi-size icon (16, 24, 32, 48, 64, 96, 128, 256 px) built by
+// Tools/MakeAppIcon.py from the per-size artwork in Resources/mycommander_extracted. Explorer, the taskbar,
+// Alt+Tab and Task Manager use the executable's first icon group.
+#define IDI_APPICON 1
+IDI_APPICON ICON "..\\..\\Resources\\mycommander.ico"
+
 VS_VERSION_INFO VERSIONINFO
  FILEVERSION MC_VERSION_MAJOR,MC_VERSION_MINOR,MC_VERSION_PATCH,MC_VERSION_BUILD
  PRODUCTVERSION MC_VERSION_MAJOR,MC_VERSION_MINOR,MC_VERSION_PATCH,MC_VERSION_BUILD

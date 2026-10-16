@@ -26,7 +26,9 @@ bool IsSameOrInside(const std::wstring& base, const std::wstring& p) {
     return p.size() == base.size() || base.back() == L'\\' || p[base.size()] == L'\\';
 }
 
-bool IsActive(JobState state) { return state == JobState::Running || state == JobState::WaitingForAnswer; }
+bool IsActive(JobState state) {
+    return state == JobState::Running || state == JobState::WaitingForAnswer || state == JobState::Paused;
+}
 
 }  // namespace
 
@@ -127,7 +129,7 @@ void OperationQueue::Finish(uint64_t id, JobState finalState) { SetState(id, fin
 // cppcheck-suppress unusedFunction
 size_t OperationQueue::ActiveCount() const {
     return static_cast<size_t>(std::count_if(jobs_.begin(), jobs_.end(), [](const Job& j) {
-        return j.state == JobState::Running || j.state == JobState::WaitingForAnswer;
+        return IsActive(j.state);
     }));
 }
 

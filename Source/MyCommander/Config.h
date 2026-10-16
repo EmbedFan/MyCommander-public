@@ -42,6 +42,9 @@ constexpr int kMaxColumnWidth = 200;  // a generous ceiling against a typo like 
 // config file changes nothing (CFG-003).
 enum class ColorTheme { Default, HighContrast };
 
+// LIST-007: see Config::autoRefresh.
+enum class AutoRefreshMode { Off, On, Poll };
+
 // FOP-008: which destructive operations require an explicit Yes/No
 // confirmation before proceeding. Both default to true (safe) so a
 // missing config file, or one where a key is absent, never silently
@@ -72,6 +75,16 @@ struct Config {
     // shell's own history file behaves; CLI-007's leading-space opt-out
     // already keeps a specific command out of history regardless of this.
     bool persistCommandHistory = true;
+    // NAV-017: whether the recently visited folders (RecentLocations.h) are loaded at
+    // startup and saved at a normal exit. Off = the list lives for the session only.
+    bool persistRecentFolders = true;
+    // LIST-009: draw colour labels (the colour and the number marker). Off hides them
+    // without deleting any label.
+    bool showLabels = true;
+    // IS-0022 / LIST-013: mark shared folders with ">" and how often the share list is
+    // re-read (seconds; 0 = only after Share/Unshare Folder and a panel refresh).
+    bool showShares = true;
+    int shareRefreshSeconds = 3;
     // ERR-004: the diagnostic log's (Log.h) severity threshold. Off by
     // default — a fresh install never writes a log file until the user
     // opts in, matching this project's general preference for the
@@ -121,6 +134,15 @@ struct Config {
     // action ("C:\...\WinMergeU.exe" "%1" "%2"). Empty (default) uses the
     // built-in difference viewer; Shift with the command always does.
     std::wstring diffProgram;
+    // LIST-007: whether a panel re-lists itself after the folder it shows is
+    // changed from outside (Explorer, another program). On = change
+    // notifications only; Poll = also re-list every autoRefreshPollSeconds
+    // where notifications are unavailable; Off = refresh only on request.
+    AutoRefreshMode autoRefresh = AutoRefreshMode::On;
+    int autoRefreshPollSeconds = 10;
+    // LIST-010: show each folder's recursive total in the Size column, measured in the
+    // background for the rows on screen. Off (default): the "<DIR>" marker as before.
+    bool folderSizes = false;
 };
 
 // CFG-005: one human-readable line per setting LoadConfigFrom couldn't

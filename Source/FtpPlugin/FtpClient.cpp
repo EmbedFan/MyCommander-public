@@ -403,6 +403,32 @@ Status Client::OpenData(SOCKET& socketOut, bool& isListener, const CancelFn& can
     return Status::Ok;
 }
 
+void Client::DrainAfterAbort() {
+    std::wstring ignored;
+    Reply first;
+    if (ReadReply(first, {}, ignored, 3) != Status::Ok) return;
+    if (first.code == 225) return;  // "no transfer to abort": the only answer
+    // A second reply may follow; silence for a second just means there isn't
+    // one -- not a lost connection, so this loop never closes the socket for it.
+    const ULONGLONG deadline = GetTickCount64() + 1000;
+    while (GetTickCount64() < deadline) {
+        if (auto next = reader_.Next()) {
+            Trace(L"< " + std::to_wstring(next->code) + L" " + Widen(next->text));
+            return;
+        }
+        if (control_ == INVALID_SOCKET) return;
+        std::wstring waitError;
+        if (WaitSocket(control_, false, 1, {}, waitError) != Status::Ok) return;
+        char buffer[4096];
+        int n = recv(control_, buffer, sizeof(buffer), 0);
+        if (n == 0 || (n == SOCKET_ERROR && WSAGetLastError() != WSAEWOULDBLOCK)) {
+            CloseControl();
+            return;
+        }
+        if (n > 0) reader_.Feed(buffer, static_cast<size_t>(n));
+    }
+}
+
 Status Client::Transfer(const std::string& command, const std::function<Status(SOCKET)>& body, const CancelFn& cancel,
                         std::wstring& error) {
     SOCKET data = INVALID_SOCKET;
@@ -433,14 +459,9 @@ Status Client::Transfer(const std::string& command, const std::function<Status(S
     closesocket(data);
 
     if (bodyStatus == Status::Cancelled) {
-        // Tell the server, then drain its 426/226 (best effort, short wait).
+        // Tell the server, then drain its replies (best effort, short wait).
         std::wstring ignored;
-        if (SendLine("ABOR", {}, ignored) == Status::Ok) {
-            Reply drain;
-            for (int i = 0; i < 2 && ReadReply(drain, {}, ignored, 3) == Status::Ok; ++i) {
-                if (drain.code == 226 || drain.code == 225) break;
-            }
-        }
+        if (SendLine("ABOR", {}, ignored) == Status::Ok) DrainAfterAbort();
         return Status::Cancelled;
     }
     s = ReadReply(reply, cancel, error);

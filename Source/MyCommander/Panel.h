@@ -5,15 +5,24 @@
 #endif
 #include <windows.h>
 
+#include "FileProvider.h"
+
 #include <cstdint>
 #include <filesystem>
+#include <functional>
+#include <memory>
 #include <optional>
+#include <set>
 #include <string>
 #include <vector>
 
 namespace mc {
 
 class Console;
+
+// EXT-002: asked before a panel leaves a provider (ZIP: save changes?).
+// Returning false keeps the panel where it is.
+using ProviderLeaveHook = std::function<bool(IFileProvider& provider)>;
 
 // FEA-0002 (MC Plugin), Phase 3, §8: a small, abstract interface a `Panel`
 // gains an optional, non-owning pointer to (PluginManager owns the
@@ -67,7 +76,9 @@ struct VolumeInfo {
 };
 
 // LIST-002: the fields a panel's listing can be sorted by.
-enum class SortKey { Name, Extension, Size, ModifiedTime };
+// LIST-011 adds Attributes: grouped by the first set attribute in the order read-only, hidden, system,
+// archive, reparse point (see AttributeSortRank), then by name.
+enum class SortKey { Name, Extension, Size, ModifiedTime, Attributes };
 
 // One navigable file-list pane: current directory, its entries, and cursor state.
 class Panel {
@@ -87,6 +98,11 @@ public:
     const VolumeInfo& Volume() const { return volumeInfo_; }
     bool ShowingHiddenAndSystem() const { return showHiddenAndSystem_; }
     bool IsLoading() const { return loading_; }
+    // UI-017: Full (today's detailed rows) vs. Brief (names only, several
+    // columns); a per-panel display preference, independent of sort order,
+    // selection, or the quick filter. View > Full/List (Ctrl+F7/Ctrl+F8).
+    bool BriefView() const { return briefView_; }
+    void SetBriefView(bool brief) { briefView_ = brief; }
 
     // LIST-006: true when the current path itself couldn't be listed at all
     // (removed drive, unreachable network share, permissions error) — as
@@ -96,6 +112,25 @@ public:
     bool LocationInaccessible() const { return locationInaccessible_; }
 
     void Refresh();
+    // LIST-007: an automatic refresh after an external change. Like Refresh(),
+    // but keeps the selection (by name; vanished names are dropped), the
+    // cursor (by name, else the nearest index) and the scroll position. The
+    // quick filter, sort order and hidden/system setting are panel state and
+    // are kept by Refresh() itself.
+    void RefreshPreservingState();
+    // NAV-016: exchanges this panel's whole listing -- folder, back/forward
+    // history, entries with their selection, cursor and scroll position, quick
+    // filter, sort key and direction, hidden/system and Full/Brief preferences,
+    // and an in-progress incremental load -- with `other`'s. The preferences
+    // that are the same for both panels (group-directories-first, incremental
+    // loading) stay put. Returns false and changes nothing if either panel
+    // shows plugin content or a provider (an archive/server): those are tied
+    // to a side by the plugin manager and the provider's own hooks.
+    bool SwapListingWith(Panel& other);
+    // Incremented each time a listing starts; lets a caller tell that a
+    // refresh began since it last looked, so change signals older than that
+    // listing are already covered by it (LIST-007).
+    uint64_t RefreshStarts() const { return refreshStarts_; }
     // LIST-008: enumerate at most `maxEntries` items, returning control to
     // the input loop between batches. Refresh() is synchronous only for
     // non-incremental/test panels.
@@ -203,7 +238,41 @@ public:
     IPanelContent* Content() const { return content_; }
     const std::wstring& ContentTitle() const { return contentTitle_; }
 
+    // EXT-002 (D2): provider mode. The panel lists `provider` at `startPath`
+    // through the same entries/sort/filter/selection/cursor code as a local
+    // folder; Path() keeps the local folder underneath, which is where the
+    // panel returns on leaving (and all Session ever stores, NAV-008).
+    // `returnSelectName` is selected in the local listing on leaving (the
+    // archive the user came from). ".." at the provider's root, Back with no
+    // provider history, NavigateTo/PreviewLocation of a local folder all
+    // leave -- each through `onLeave` first.
+    void OpenProvider(std::shared_ptr<IFileProvider> provider, std::wstring startPath,
+                      std::wstring returnSelectName = L"", ProviderLeaveHook onLeave = {});
+    // Leaves provider mode; unless `force`, only when `onLeave` agrees.
+    // Returns whether the panel left.
+    bool CloseProvider(bool force = false);
+    bool InProvider() const { return provider_ != nullptr; }
+    IFileProvider* Provider() const { return provider_.get(); }
+    const std::shared_ptr<IFileProvider>& ProviderShared() const { return provider_; }
+    const std::wstring& ProviderPath() const { return providerPath_; }
+    // Join(ProviderPath(), name) in provider mode, else the local path.
+    std::wstring ItemLocation(const std::wstring& name) const;
+    // The header text: DisplayRoot() + provider path, or the local path.
+    std::wstring LocationText() const;
+    // Moves within the provider (records history like NavigateTo).
+    void NavigateProvider(const std::wstring& path, const std::wstring& selectName = L"");
+
 private:
+    std::shared_ptr<IFileProvider> provider_;
+    std::wstring providerPath_;
+    std::wstring providerReturnName_;
+    ProviderLeaveHook providerLeave_;
+    std::vector<std::wstring> providerBack_;
+    std::vector<std::wstring> providerForward_;
+    void RefreshFromProvider();
+    void SetProviderLocation(const std::wstring& path, const std::wstring& selectName);
+    bool LeaveProviderFor(bool refreshLocal);
+
     std::filesystem::path path_;
     std::vector<Entry> entries_;
     int cursor_ = 0;
@@ -214,6 +283,7 @@ private:
     bool sortDescending_ = false;
     bool groupDirectoriesFirst_ = true;
     bool showHiddenAndSystem_ = false;
+    bool briefView_ = false;
     bool incrementalLoading_ = false;
     bool loading_ = false;
     bool locationInaccessible_ = false;
@@ -235,6 +305,13 @@ private:
     // (0 = not known yet), so a refresh that restores the cursor far down a
     // long listing can scroll it into view without main.cpp's help.
     int lastVisibleRows_ = 0;
+    // LIST-007: state RefreshPreservingState() asks the next completed listing
+    // to restore (see ApplyPreservedState).
+    bool preserveState_ = false;
+    std::set<std::wstring> keptSelection_;
+    int keptCursorIndex_ = 0;
+    int keptTopIndex_ = 0;
+    uint64_t refreshStarts_ = 0;
 
     IPanelContent* content_ = nullptr;  // FEA-0002 Phase 3, §8: non-owning, see SetContent
     std::wstring contentTitle_;
@@ -244,6 +321,7 @@ private:
     void SortEntries();
     void BeginRefresh();
     void FinishRefresh();
+    void ApplyPreservedState(const std::wstring& cursorName);
     void AddListedEntry(const std::filesystem::directory_entry& item);
     void SetLocation(const std::filesystem::path& dir, const std::wstring& selectName);
 };

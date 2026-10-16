@@ -83,6 +83,13 @@ std::vector<NamedAttr> PaletteEntries(const ThemePalette& p) {
         {L"attrDiffAdded", p.attrDiffAdded},
         {L"attrDiffChanged", p.attrDiffChanged},
         {L"attrDiffHighlight", p.attrDiffHighlight},
+        // LIST-009: the six colour labels (name colour on the black panel background).
+        {L"attrLabel1", p.attrLabel[0]},
+        {L"attrLabel2", p.attrLabel[1]},
+        {L"attrLabel3", p.attrLabel[2]},
+        {L"attrLabel4", p.attrLabel[3]},
+        {L"attrLabel5", p.attrLabel[4]},
+        {L"attrLabel6", p.attrLabel[5]},
     };
 }
 

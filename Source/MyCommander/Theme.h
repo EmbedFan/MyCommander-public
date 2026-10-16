@@ -72,6 +72,10 @@ struct ThemePalette {
     WORD attrDiffAdded;
     WORD attrDiffChanged;
     WORD attrDiffHighlight;
+    // LIST-009: the six colour labels' name colours (label 1..6), foreground on the
+    // panel's black background, each >= 4.5:1. The label's number is also drawn in
+    // the row's marker cell, so a label is never conveyed by colour alone.
+    WORD attrLabel[6];
 };
 
 // The original, always-default palette (unchanged from ACC-002's fixes).
@@ -99,6 +103,12 @@ constexpr ThemePalette kDefaultThemePalette = {
     /* attrDiffAdded     */ FOREGROUND_GREEN | FOREGROUND_INTENSITY,  // bright green on black, ~15.3:1 (plus '>')
     /* attrDiffChanged   */ FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_INTENSITY,  // bright yellow on black, ~19.6:1 (plus '~')
     /* attrDiffHighlight */ BACKGROUND_RED | BACKGROUND_GREEN | BACKGROUND_INTENSITY,  // black on bright yellow, ~19.6:1
+    /* attrLabel         */ {FOREGROUND_RED | FOREGROUND_INTENSITY,                          // 1 Red: bright red on black, ~5.3:1
+                           FOREGROUND_RED | FOREGROUND_GREEN,                              // 2 Amber: dark yellow, ~5.0:1
+                           FOREGROUND_GREEN | FOREGROUND_INTENSITY,                        // 3 Green: bright green, ~15.3:1
+                           FOREGROUND_GREEN | FOREGROUND_BLUE | FOREGROUND_INTENSITY,      // 4 Cyan: bright cyan, ~16.7:1
+                           FOREGROUND_RED | FOREGROUND_BLUE | FOREGROUND_INTENSITY,        // 5 Magenta: bright magenta, ~6.7:1
+                           FOREGROUND_INTENSITY},                                          // 6 Gray: dark gray, ~5.3:1
 };
 
 // UI-010: a high-contrast palette. Everywhere the default palette settled
@@ -139,6 +149,12 @@ constexpr ThemePalette kHighContrastThemePalette = {
     /* attrDiffAdded     */ FOREGROUND_GREEN | FOREGROUND_INTENSITY,  // bright green on black, ~15.3:1 (plus '>')
     /* attrDiffChanged   */ FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_INTENSITY,  // bright yellow on black, ~19.6:1 (plus '~')
     /* attrDiffHighlight */ BACKGROUND_RED | BACKGROUND_GREEN | BACKGROUND_INTENSITY,  // black on bright yellow, ~19.6:1
+    /* attrLabel         */ {FOREGROUND_RED | FOREGROUND_INTENSITY,                          // 1 Red: bright red on black, ~5.3:1
+                           FOREGROUND_RED | FOREGROUND_GREEN,                              // 2 Amber: dark yellow, ~5.0:1
+                           FOREGROUND_GREEN | FOREGROUND_INTENSITY,                        // 3 Green: bright green, ~15.3:1
+                           FOREGROUND_GREEN | FOREGROUND_BLUE | FOREGROUND_INTENSITY,      // 4 Cyan: bright cyan, ~16.7:1
+                           FOREGROUND_RED | FOREGROUND_BLUE | FOREGROUND_INTENSITY,        // 5 Magenta: bright magenta, ~6.7:1
+                           FOREGROUND_INTENSITY},                                          // 6 Gray: dark gray, ~5.3:1
 };
 
 // The live, currently-selected colors — see this file's own top comment
@@ -164,6 +180,9 @@ inline WORD kAttrDiffRemoved = kDefaultThemePalette.attrDiffRemoved;
 inline WORD kAttrDiffAdded = kDefaultThemePalette.attrDiffAdded;
 inline WORD kAttrDiffChanged = kDefaultThemePalette.attrDiffChanged;
 inline WORD kAttrDiffHighlight = kDefaultThemePalette.attrDiffHighlight;
+inline WORD kAttrLabel[6] = {kDefaultThemePalette.attrLabel[0], kDefaultThemePalette.attrLabel[1],
+                             kDefaultThemePalette.attrLabel[2], kDefaultThemePalette.attrLabel[3],
+                             kDefaultThemePalette.attrLabel[4], kDefaultThemePalette.attrLabel[5]};
 
 // Mask of just the three foreground color bits (no intensity, no
 // background) — used to recolor a row for the cursor highlight while
@@ -224,5 +243,6 @@ inline void ApplyThemePalette(const ThemePalette& palette) {
     kAttrDiffAdded = palette.attrDiffAdded;
     kAttrDiffChanged = palette.attrDiffChanged;
     kAttrDiffHighlight = palette.attrDiffHighlight;
+    for (int i = 0; i < 6; ++i) kAttrLabel[i] = palette.attrLabel[i];
     for (const auto& listener : ThemeChangeListeners()) listener(palette);
 }

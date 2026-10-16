@@ -16,6 +16,7 @@
 // append new fields to the end of this struct under a minor version bump
 // (MC_PLUGIN_API_VERSION_MINOR), never reorder or remove what's here.
 
+#include "McFileSystem.h"
 #include "McPluginAbi.h"
 #include "McPluginTypes.h"
 
@@ -226,6 +227,54 @@ struct McPluginHost {
     // CancelPoll callback) so Esc actually interrupts the loop instead of
     // sitting unconsumed in the input buffer until the operation finishes.
     bool (__stdcall* PollCancel)(void);
+    // API 1.11 (FOP-015): the explicit pause point. The user can pause a running
+    // operation with P (or Pause/Break); PollCancel never blocks, so a plugin
+    // that supports pausing calls this at SAFE points only -- between items, or
+    // between transfer chunks when no network wait is in progress -- never
+    // inside a bounded wait. It blocks while the operation is paused, keeping
+    // the host's progress box responsive (the box reads "[paused]"), and
+    // returns true to continue or false if the user cancelled (Esc) while it
+    // waited. Plugins built against API <= 1.10 never call it and simply can't
+    // be paused: the host ignores P while one of them is working. Check
+    // `host->cbSize > offsetof(McPluginHost, WaitWhilePaused)` before calling
+    // if the plugin may run on an older host.
+    bool (__stdcall* WaitWhilePaused)(void);
+
+    // API 1.12 (EXT-002): file-system providers, see McFileSystem.h. Needs
+    // kMcPluginCapFileSystem. OpenProvider shows `provider` in panel `side`
+    // at `startPath` (NULL = its rootPath); `returnSelectName` (may be NULL)
+    // is selected in the local folder when the panel leaves it again (e.g.
+    // the archive's own file name). On true the host owns the table: it
+    // copies it and calls its Close exactly once later. On false (invalid
+    // table, or the panel refused to leave where it is -- e.g. the user
+    // cancelled saving a modified archive) nothing was taken over and the
+    // plugin must free its context itself.
+    bool (__stdcall* OpenProvider)(McPanelSide side, const McFsProvider* provider, const wchar_t* startPath,
+                                   const wchar_t* returnSelectName);
+    // Leaves the provider shown on `side`, if THIS plugin opened it (asks to
+    // save pending changes first, like ".."). False if the user cancelled.
+    bool (__stdcall* CloseProvider)(McPanelSide side);
+    // The `context` of the provider THIS plugin has open on `side`, or NULL
+    // (no provider there, or another plugin's). For commands acting on it.
+    void* (__stdcall* GetPanelProvider)(McPanelSide side);
+    // The current folder inside that provider (truncate-safe); false (buffer
+    // untouched) when GetPanelProvider would return NULL.
+    bool (__stdcall* GetPanelProviderPath)(McPanelSide side, wchar_t* outBuffer, int outBufferSize);
+    // Whether panel `side` shows ANY provider right now (an archive, a server,
+    // ... -- this plugin's or another's). GetPanelPath/GetActivePanelPath and
+    // the selected names then don't describe a local folder the user can see
+    // (GetPanelPath keeps answering with the local folder underneath), so a
+    // command working on local files should refuse rather than act there.
+    bool (__stdcall* IsPanelInProvider)(McPanelSide side);
+
+    // API 1.13 (FEA-0010): makes panel `side` show the folder `path` (a drive path, a UNC
+    // path such as \server\share, any folder the user could type into the command line),
+    // like a "go to this folder" from the keyboard: history is kept, a folder that cannot
+    // be listed shows the usual banner. Returns false, and changes nothing, when `path` is
+    // NULL/empty, or the panel currently shows plugin content or a provider (leave that
+    // first). Check `host->structSize > offsetof(McPluginHost, NavigatePanel)` before
+    // calling if the plugin may run on an older host.
+    bool (__stdcall* NavigatePanel)(McPanelSide side, const wchar_t* path);
 };
 
 #ifdef __cplusplus

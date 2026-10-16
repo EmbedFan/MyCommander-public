@@ -30,7 +30,7 @@ extern "C" {
 // ever used fields the host still supports); a plugin declaring a *newer*
 // minor than the host knows about is rejected, not guessed at.
 #define MC_PLUGIN_API_VERSION_MAJOR 1
-#define MC_PLUGIN_API_VERSION_MINOR 10  // 1.9: kMcFormFieldPassword (FTP-010); 1.10: viewer plugins (EXT-003)
+#define MC_PLUGIN_API_VERSION_MINOR 13  // 1.13: NavigatePanel (FEA-0010); 1.9: kMcFormFieldPassword (FTP-010); 1.10: viewer plugins (EXT-003); 1.11: WaitWhilePaused (FOP-015); 1.12: file-system providers (EXT-002)
 
 // The cheap, fast first check that distinguishes an MC Plugin DLL from an
 // unrelated DLL that happens to export a same-named symbol by coincidence,
@@ -58,6 +58,8 @@ typedef enum McPluginCapability {
                                      // older host.
     kMcPluginCapArchiveHandler = 1 << 5,  // claims files as navigable virtual directories
     kMcPluginCapViewer = 1 << 6,          // API 1.10 (EXT-003): renders files as text for the host's viewer
+    kMcPluginCapFileSystem = 1 << 7,      // API 1.12 (EXT-002): opens McFsProvider tables in host panels
+                                          // (McPluginHost::OpenProvider, McFileSystem.h)
 } McPluginCapability;
 
 // Phase 3, §8: which of the two main panels a panel-content call concerns.

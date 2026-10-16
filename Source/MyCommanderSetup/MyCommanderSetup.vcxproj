@@ -51,6 +51,7 @@
   </PropertyGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <ClCompile>
+      <MultiProcessorCompilation>true</MultiProcessorCompilation>
       <WarningLevel>Level4</WarningLevel>
       <SDLCheck>true</SDLCheck>
       <PreprocessorDefinitions>_DEBUG;_CONSOLE;UNICODE;_UNICODE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
@@ -70,6 +71,7 @@
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <ClCompile>
+      <MultiProcessorCompilation>true</MultiProcessorCompilation>
       <WarningLevel>Level4</WarningLevel>
       <FunctionLevelLinking>true</FunctionLevelLinking>
       <IntrinsicFunctions>true</IntrinsicFunctions>
@@ -94,6 +96,9 @@
   <ItemGroup>
     <ClCompile Include="main.cpp" />
     <ClCompile Include="SetupLogic.cpp" />
+    <ClCompile Include="..\MyCommander\Shortcut.cpp">
+      <ObjectFileName>$(IntDir)MyCommander_Shortcut.obj</ObjectFileName>
+    </ClCompile>
     <ClCompile Include="..\MyCommander\Process.cpp">
       <ObjectFileName>$(IntDir)MyCommander_Process.obj</ObjectFileName>
     </ClCompile>
@@ -103,6 +108,7 @@
     <ClInclude Include="resource.h" />
     <ClInclude Include="..\MyCommander\PathUtil.h" />
     <ClInclude Include="..\MyCommander\Process.h" />
+    <ClInclude Include="..\MyCommander\Shortcut.h" />
     <ClInclude Include="..\MyCommander\Version.h" />
   </ItemGroup>
   <ItemGroup>

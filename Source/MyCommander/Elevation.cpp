@@ -1,5 +1,7 @@
 #include "Elevation.h"
 
+#include "NetDrives.h"
+#include "NetShares.h"
 #include "PathUtil.h"
 #include "Process.h"
 
@@ -13,7 +15,11 @@ constexpr wchar_t kCopyFlag[] = L"--elevated-copy";
 constexpr wchar_t kMoveFlag[] = L"--elevated-move";
 constexpr wchar_t kDeleteFlag[] = L"--elevated-delete";
 constexpr wchar_t kAttribFlag[] = L"--elevated-attrib";
+constexpr wchar_t kLabelFlag[] = L"--elevated-label";
+constexpr wchar_t kShareFlag[] = L"--elevated-share";
+constexpr wchar_t kUnshareFlag[] = L"--elevated-unshare";
 constexpr wchar_t kOverwriteFlag[] = L"--overwrite";
+constexpr wchar_t kReadOnlyFlag[] = L"--readonly";
 
 const wchar_t* AttributeFlagName(FileAttributeFlag flag) {
     switch (flag) {
@@ -79,6 +85,22 @@ std::wstring BuildElevatedHelperParameters(const ElevatedRequest& request) {
             append(request.source.wstring());
             append(AttributeFlagName(request.attributeFlag));
             break;
+        case ElevatedAction::SetVolumeLabel:
+            append(kLabelFlag);
+            append(request.source.wstring());
+            append(request.text);
+            break;
+        case ElevatedAction::ShareFolder:
+            append(kShareFlag);
+            append(request.source.wstring());
+            append(request.text);
+            append(request.description);
+            if (request.readOnly) append(kReadOnlyFlag);
+            break;
+        case ElevatedAction::UnshareFolder:
+            append(kUnshareFlag);
+            append(request.text);
+            break;
     }
     return parameters;
 }
@@ -136,6 +158,16 @@ std::optional<DWORD> RunAsElevatedHelperIfRequested(int argc, wchar_t** argv) {
         FileAttributeFlag attrFlag;
         if (!ParseAttributeFlagName(argv[3], attrFlag)) return static_cast<DWORD>(ERROR_INVALID_PARAMETER);
         ok = ToggleAttributeElevated(argv[2], attrFlag, err, win32Error);
+    } else if (flag == kLabelFlag) {
+        if (argc < 4) return static_cast<DWORD>(ERROR_INVALID_PARAMETER);
+        ok = SetVolumeLabelElevated(argv[2], argv[3], err, win32Error);
+    } else if (flag == kShareFlag) {
+        if (argc < 5) return static_cast<DWORD>(ERROR_INVALID_PARAMETER);
+        bool readOnly = argc >= 6 && std::wstring(argv[5]) == kReadOnlyFlag;
+        ok = AddShareElevated(argv[3], argv[2], argv[4], readOnly, err, win32Error);
+    } else if (flag == kUnshareFlag) {
+        if (argc < 3) return static_cast<DWORD>(ERROR_INVALID_PARAMETER);
+        ok = DeleteShareElevated(argv[2], err, win32Error);
     } else {
         return std::nullopt;  // not an elevated-helper invocation at all
     }

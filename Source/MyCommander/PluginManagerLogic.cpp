@@ -42,6 +42,10 @@ bool ConflictsWithBuiltinShortcut(const PluginShortcutKey& key, const std::vecto
     return std::find(builtinKeys.begin(), builtinKeys.end(), key) != builtinKeys.end();
 }
 
+bool CanNavigatePanel(bool panelHasContent, bool panelInProvider) {
+    return !panelHasContent && !panelInProvider;
+}
+
 const std::vector<PluginShortcutKey>& BuiltinShortcutInventory() {
     static const std::vector<PluginShortcutKey> keys = {
         // Function keys, plain and modified -- see main.cpp's own
@@ -58,7 +62,7 @@ const std::vector<PluginShortcutKey>& BuiltinShortcutInventory() {
         {VK_F6, false, false, false}, {VK_F6, true, false, false},                          // F6, Ctrl+F6
         {VK_F7, false, false, false}, {VK_F7, false, true, false}, {VK_F7, false, false, true},  // F7, Shift+F7, Alt+F7
         {VK_F8, false, false, false}, {VK_F8, false, true, false},                          // F8, Shift+F8
-        {VK_F9, false, false, false},
+        {VK_F9, false, false, false}, {VK_F9, true, false, false},  // F9, Ctrl+F9 (sort by attributes, LIST-011)
         {VK_F10, false, false, false},
         {VK_F11, true, false, false},  // Ctrl+F11 (IS-0006)
         // Ctrl+letter shortcuts.
@@ -69,9 +73,18 @@ const std::vector<PluginShortcutKey>& BuiltinShortcutInventory() {
         {static_cast<WORD>(L'T'), true, false, false},  // Ctrl+T (directory tree, UI-013)
         {static_cast<WORD>(L'D'), true, false, false},  // Ctrl+D (directory hotlist, NAV-007)
         {static_cast<WORD>(L'M'), true, false, false},  // Ctrl+M (group rename, FOP-017)
+        {static_cast<WORD>(L'U'), true, false, false},  // Ctrl+U (swap panels, NAV-016)
+        {static_cast<WORD>(L'L'), true, false, false}, {static_cast<WORD>(L'L'), true, true, false},  // Ctrl+L, Ctrl+Shift+L (colour labels, LIST-009)
+        {static_cast<WORD>(L'Z'), true, false, false},  // Ctrl+Z (undo, FOP-022)
+        {static_cast<WORD>(L'V'), false, true, true},   // Alt+Shift+V (paste from Explorer, FOP-025)
+        {VK_F12, false, false, true},                   // Alt+F12 (recent folders, NAV-017)
+        {VK_F12, true, false, false},                   // Ctrl+F12 (largest files, SRC-010)
+        {VK_F7, false, true, true},                     // Alt+Shift+F7 (find empty folders, SRC-009)
         {VK_F5, false, false, true}, {VK_F6, false, false, true},  // Alt+F5, Alt+F6 (queued copy/move, FOP-014)
         {VK_F8, false, false, true}, {VK_F8, false, true, true},   // Alt+F8, Alt+Shift+F8 (queued delete, FOP-014)
         {static_cast<WORD>(L'Q'), false, false, true},  // Alt+Q (job queue, FOP-014)
+        {static_cast<WORD>(L'R'), false, false, true},  // Alt+R (reverse history search, CLI-008)
+        {VK_SPACE, true, false, false},                 // Ctrl+Space (complete path, NAV-018)
         // The menu bar's own six top-menu mnemonics (FEA-0005): Alt+letter
         // opens that menu from the closed state.
         {static_cast<WORD>(L'F'), false, false, true},  // Alt+F (File)

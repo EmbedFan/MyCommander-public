@@ -27,18 +27,15 @@
 // post-compression size) into independent, separately-openable .zip files
 // (name.1.zip, name.2.zip, ...), not true PKZIP-spec multi-volume spanning.
 //
-// Phase 1/2 declare only kMcPluginCapMenu -- kMcPluginCapArchiveHandler
-// (claiming a .zip file as a virtual directory, FEA-0007 §2) and
-// kMcPluginCapPanel (live archive browsing, §7) are Phase 3 concerns, not
-// yet implemented; declaring them now with no matching exports would be a
-// load-time warning for nothing gained, so unlike the plan's own "declare
-// both from the start" suggestion, this implementation adds each
-// capability only when the phase that actually uses it lands.
+// Phase 3 (live browsing) has been a file-system provider since EXT-002
+// (kMcPluginCapFileSystem, API 1.12): the host draws the archive in its own
+// panel; see the "Phase 3 / EXT-002" section below.
 
 #include "../MyCommanderPluginSdk/McPluginAbi.h"
 #include "../MyCommanderPluginSdk/McPluginHost.h"
 #include "../MyCommanderPluginSdk/McPluginTypes.h"
 #include "Version.h"
+#include "ZipCrypto.h"
 #include "../MyCommander/TextWidth.h"
 
 #include "third_party/miniz/miniz.h"
@@ -51,6 +48,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <iterator>
+#include <memory>
 #include <numeric>
 #include <cstdlib>
 #include <cstring>
@@ -61,10 +59,22 @@
 namespace {
 
 const McPluginHost* g_host = nullptr;
+
+// FOP-015 (API 1.11): the per-entry cancel check is also the pause point. The
+// host's WaitWhilePaused consumes the Esc that cancels it, so that answer is
+// remembered here until the operation's own check has seen it.
+bool g_pauseCancelled = false;
+bool UserCancelled() {
+    if (!g_host) return false;
+    if (g_host->WaitWhilePaused && !g_host->WaitWhilePaused()) g_pauseCancelled = true;
+    if (g_pauseCancelled) return true;
+    return g_host->PollCancel && g_host->PollCancel();
+}
 class ArchiveProgress {
     bool open_ = false;
 public:
     ArchiveProgress(const wchar_t* title, uint64_t total, bool enabled = true) {
+        if (enabled) g_pauseCancelled = false;  // FOP-015: a new operation starts clean
         if (enabled && g_host && g_host->BeginProgress && g_host->UpdateProgress && g_host->EndProgress)
             open_ = g_host->BeginProgress(title, total);
     }
@@ -120,6 +130,18 @@ void LogWarning(const std::wstring& message) {
 }
 void LogError(const std::wstring& message) {
     if (g_host) g_host->Log(kMcLogError, message.c_str());
+}
+
+// EXT-002: Pack / Unpack / Archive info read and write local folders; a
+// panel showing an archive or a server isn't one (its path is the local
+// folder hidden underneath), so they refuse instead of acting out of sight.
+bool RefuseProviderPanels(const wchar_t* title) {
+    if (!g_host || !g_host->IsPanelInProvider) return false;
+    if (!g_host->IsPanelInProvider(kMcPanelLeft) && !g_host->IsPanelInProvider(kMcPanelRight)) return false;
+    const wchar_t* lines[] = {L"This works between local folders.",
+                              L"Leave the archive or server panel first, or copy the files out with F5."};
+    g_host->ShowMessage(title, lines, 2);
+    return true;
 }
 
 std::vector<std::wstring> GetSelectedNamesList() {
@@ -321,7 +343,34 @@ bool PatchExternalAttributes(std::vector<uint8_t>& zipData, const std::vector<ui
 // the ANSI codepage, which would silently mishandle a Unicode filename this
 // app must support (PathUtil.h's own "treat paths as data" discipline).
 bool WriteZipArchive(const std::vector<PackEntry>& entries, const std::wstring& outputPath, mz_uint levelAndFlags,
-                      ArchiveProgress& progress, uint64_t& processed, uint64_t total, bool& cancelled) {
+                      ArchiveProgress& progress, uint64_t& processed, uint64_t total, bool& cancelled,
+                      const zipcrypto::Secret* password = nullptr) {
+    if (password && !password->Empty()) {
+        // ARC-004: an encrypted archive is assembled by ZipBuilder (WinZip AES-256)
+        // instead of miniz's writer, which cannot encrypt. The password is only
+        // ever handed to ZipBuilder; nothing below formats it into a message.
+        zipcrypto::ZipBuilder builder(*password, static_cast<int>(levelAndFlags));
+        for (const auto& entry : entries) {
+            if (UserCancelled()) { cancelled = true; return false; }
+            progress.Update(processed++, total, entry.archiveName);
+            std::vector<uint8_t> bytes = ReadFileBytes(entry.sourcePath);
+            if (!builder.Add(Utf8ArchiveName(entry.archiveName), bytes.data(), bytes.size(), entry.attributes, false)) {
+                LogError(L"Pack file: failed adding \"" + entry.archiveName +
+                         L"\" to the encrypted archive (too many entries, or an entry or the archive exceeds 4 GB).");
+                return false;
+            }
+        }
+        std::vector<uint8_t> encrypted;
+        if (!builder.Finish(encrypted)) {
+            LogError(L"Pack file: could not finish the encrypted archive \"" + outputPath + L"\".");
+            return false;
+        }
+        if (!WriteFileBytes(outputPath, encrypted)) {
+            LogError(L"Pack file: could not write \"" + outputPath + L"\".");
+            return false;
+        }
+        return true;
+    }
     mz_zip_archive zip;
     memset(&zip, 0, sizeof(zip));
     if (!mz_zip_writer_init_heap(&zip, 0, 0)) {
@@ -334,7 +383,7 @@ bool WriteZipArchive(const std::vector<PackEntry>& entries, const std::wstring& 
     for (const auto& entry : entries) {
         // IS-0010: packing had no progress/cancel at all before this --
         // same CancelPoll-shaped check as ExtractOrMove above.
-        if (g_host->PollCancel && g_host->PollCancel()) { cancelled = true; ok = false; break; }
+        if (UserCancelled()) { cancelled = true; ok = false; break; }
         progress.Update(processed++, total, entry.archiveName);
         std::vector<uint8_t> bytes = ReadFileBytes(entry.sourcePath);
         std::string archiveNameUtf8 = Utf8ArchiveName(entry.archiveName);
@@ -391,10 +440,10 @@ std::wstring InsertBinSuffix(const std::wstring& path, int binNumber) {
 }
 
 void PackSelection() {
-    if (!g_host) return;
+    if (!g_host || RefuseProviderPanels(L"Pack file")) return;
 
     const wchar_t* compressionChoices[] = {L"Store", L"Fast", L"Normal", L"Best"};
-    McFormField fields[4] = {};
+    McFormField fields[7] = {};
 
     fields[0].structSize = sizeof(McFormField);
     fields[0].kind = kMcFormFieldChoice;
@@ -420,10 +469,54 @@ void PackSelection() {
     fields[3].label = L"Split into multiple archives if needed";
     fields[3].boolValue = false;
 
-    if (!g_host->ShowForm(L"Pack files", fields, 4)) {
-        LogInfo(L"Pack file: cancelled (options dialog).");
-        return;
+    // ARC-004: optional AES-256 password protection. The password lives in
+    // these two stack buffers (wiped below) and then in `packPassword`.
+    wchar_t passwordBuffer[256] = {}, confirmBuffer[256] = {};
+    fields[4].structSize = sizeof(McFormField);
+    fields[4].kind = kMcFormFieldCheckbox;
+    fields[4].label = L"Encrypt with a password (AES-256)";
+    fields[4].boolValue = false;
+    fields[5].structSize = sizeof(McFormField);
+    fields[5].kind = kMcFormFieldPassword;
+    fields[5].label = L"Password";
+    fields[5].textBuffer = passwordBuffer;
+    fields[5].textBufferSize = 256;
+    fields[6].structSize = sizeof(McFormField);
+    fields[6].kind = kMcFormFieldPassword;
+    fields[6].label = L"Confirm password";
+    fields[6].textBuffer = confirmBuffer;
+    fields[6].textBufferSize = 256;
+
+    zipcrypto::Secret packPassword;
+    bool confirmed = false;
+    while (!confirmed) {
+        if (!g_host->ShowForm(L"Pack files", fields, 7)) {
+            SecureZeroMemory(passwordBuffer, sizeof(passwordBuffer));
+            SecureZeroMemory(confirmBuffer, sizeof(confirmBuffer));
+            LogInfo(L"Pack file: cancelled (options dialog).");
+            return;
+        }
+        if (!fields[4].boolValue) { confirmed = true; break; }
+        if (passwordBuffer[0] == L'\0') {
+            const wchar_t* lines[] = {L"Enter a password, or untick \"Encrypt with a password\"."};
+            g_host->ShowMessage(L"Pack file", lines, 1);
+            continue;
+        }
+        if (wcscmp(passwordBuffer, confirmBuffer) != 0) {
+            const wchar_t* lines[] = {L"The two passwords do not match."};
+            g_host->ShowMessage(L"Pack file", lines, 1);
+            continue;
+        }
+        if (wcslen(passwordBuffer) < 8) {
+            const wchar_t* lines[] = {L"This password is shorter than 8 characters."};
+            McDialogOption options[] = {{L'U', L"Use it anyway"}, {L'C', L"Change it"}};
+            if (g_host->ShowChoice(L"Weak password", lines, 1, options, 2) != 0) continue;
+        }
+        packPassword.Set(passwordBuffer);
+        confirmed = true;
     }
+    SecureZeroMemory(passwordBuffer, sizeof(passwordBuffer));
+    SecureZeroMemory(confirmBuffer, sizeof(confirmBuffer));
 
     bool includeSubdirs = fields[1].boolValue;
     int64_t maxSizeMB = fields[2].numberValue;
@@ -531,7 +624,8 @@ void PackSelection() {
     bool cancelled = false;
     for (size_t i = 0; i < bins.size() && !cancelled; ++i) {
         std::wstring binPath = (bins.size() == 1) ? outputPath : InsertBinSuffix(outputPath, static_cast<int>(i + 1));
-        if (WriteZipArchive(bins[i], binPath, levelAndFlags, packProgress, processed, totalItems, cancelled)) {
+        if (WriteZipArchive(bins[i], binPath, levelAndFlags, packProgress, processed, totalItems, cancelled,
+                            packPassword.Empty() ? nullptr : &packPassword)) {
             ++written;
             LogInfo(L"Pack file: wrote \"" + binPath + L"\" (" + std::to_wstring(bins[i].size()) + L" item(s)).");
         } else if (!cancelled) {
@@ -600,6 +694,70 @@ std::wstring StripExtension(const std::wstring& name) {
     return dot == std::wstring::npos ? name : name.substr(0, dot);
 }
 
+// ARC-004: asks for an archive password in a masked field. false = Esc (or an
+// empty password). The text exists only in the wiped stack buffer and in `out`.
+bool AskArchivePassword(const std::wstring& archiveName, bool wasWrong, zipcrypto::Secret& out) {
+    if (!g_host || !g_host->ShowForm) return false;
+    wchar_t buffer[256] = {};
+    std::wstring label = (wasWrong ? L"Wrong password, try again: " : L"Password for ") + archiveName;
+    McFormField field = {};
+    field.structSize = sizeof(McFormField);
+    field.kind = kMcFormFieldPassword;
+    field.label = label.c_str();
+    field.textBuffer = buffer;
+    field.textBufferSize = 256;
+    bool accepted = g_host->ShowForm(L"Encrypted archive", &field, 1);
+    if (accepted) out.Set(buffer);
+    SecureZeroMemory(buffer, sizeof(buffer));
+    return accepted && !out.Empty();
+}
+
+enum class EntryRead { Ok, Cancelled, Failed };
+
+// Reads entry `index` of the in-memory archive, decrypting it when it is
+// encrypted. `password` is the archive's cached secret: tried first, asked for
+// (three tries at most) when empty or wrong. Never logs the password; the
+// entry and archive names are all a log line gets.
+EntryRead ReadArchiveEntry(const std::vector<uint8_t>& zipBytes, mz_zip_archive& zip, mz_uint index,
+                           const mz_zip_archive_file_stat& stat, const std::wstring& entryName,
+                           const std::wstring& archiveName, zipcrypto::Secret& password, std::vector<uint8_t>& out) {
+    if (!stat.m_is_encrypted) {
+        size_t size = 0;
+        void* data = mz_zip_reader_extract_to_heap(&zip, index, &size, 0);
+        if (!data) return EntryRead::Failed;
+        out.assign(static_cast<uint8_t*>(data), static_cast<uint8_t*>(data) + size);
+        mz_free(data);
+        return EntryRead::Ok;
+    }
+    zipcrypto::EntryRef ref;
+    ref.localHeaderOffset = stat.m_local_header_ofs;
+    ref.compressedSize = stat.m_comp_size;
+    ref.uncompressedSize = stat.m_uncomp_size;
+    ref.crc32 = stat.m_crc32;
+    ref.flags = stat.m_bit_flag;
+    ref.method = stat.m_method;
+    bool wasWrong = false;
+    for (int attempt = 0; attempt < 3; ++attempt) {
+        if (password.Empty() && !AskArchivePassword(archiveName, wasWrong, password)) return EntryRead::Cancelled;
+        switch (zipcrypto::ExtractEncryptedEntry(zipBytes.data(), zipBytes.size(), ref, password, out)) {
+            case zipcrypto::Status::Ok:
+                return EntryRead::Ok;
+            case zipcrypto::Status::WrongPassword:
+                password.Clear();
+                wasWrong = true;
+                break;
+            case zipcrypto::Status::Corrupt:
+                LogWarning(L"Archive: \"" + entryName + L"\" in \"" + archiveName + L"\" is damaged (authentication failed).");
+                return EntryRead::Failed;
+            case zipcrypto::Status::Unsupported:
+                LogWarning(L"Archive: \"" + entryName + L"\" in \"" + archiveName + L"\" uses an unsupported encryption method.");
+                return EntryRead::Failed;
+        }
+    }
+    LogWarning(L"Archive: no valid password given for \"" + archiveName + L"\".");
+    return EntryRead::Failed;
+}
+
 // Extracts every entry of the archive at `zipPath` into `destDir`
 // (created if needed), restoring each entry's stored Win32 attributes.
 // Reads the whole archive into memory first (ReadFileBytes, Unicode-safe)
@@ -610,8 +768,8 @@ std::wstring StripExtension(const std::wstring& name) {
 // at the destination, are skipped and logged, not overwritten -- the same
 // non-interactive-batch-operation convention Pack's own flattening
 // collision case already uses.
-int ExtractZipArchive(const std::wstring& zipPath, const std::wstring& destDir, ArchiveProgress& progress,
-                       uint64_t& processed, bool& cancelled) {
+int ExtractZipArchive(const std::wstring& zipPath, const std::wstring& destDir, const ArchiveProgress& progress,
+                       uint64_t& processed, bool& cancelled, zipcrypto::Secret& password) {
     std::vector<uint8_t> zipBytes = ReadFileBytes(zipPath);
     if (zipBytes.empty()) {
         LogError(L"Unpack Package: could not read \"" + zipPath + L"\".");
@@ -630,7 +788,7 @@ int ExtractZipArchive(const std::wstring& zipPath, const std::wstring& destDir, 
     for (mz_uint i = 0; i < fileCount; ++i) {
         // IS-0010: unpacking had no progress/cancel at all before this --
         // same CancelPoll-shaped check as Pack/ExtractOrMove above.
-        if (g_host->PollCancel && g_host->PollCancel()) { cancelled = true; break; }
+        if (UserCancelled()) { cancelled = true; break; }
         mz_zip_archive_file_stat stat;
         if (!mz_zip_reader_file_stat(&zip, i, &stat)) continue;
 
@@ -662,14 +820,19 @@ int ExtractZipArchive(const std::wstring& zipPath, const std::wstring& destDir, 
         size_t slash = destPath.find_last_of(L'\\');
         if (slash != std::wstring::npos) EnsureDirectoryExists(destPath.substr(0, slash));
 
-        size_t extractedSize = 0;
-        void* data = mz_zip_reader_extract_to_heap(&zip, i, &extractedSize, 0);
-        if (!data) {
+        std::vector<uint8_t> bytes;
+        size_t archiveSlash = zipPath.find_last_of(L"\\/");
+        EntryRead read = ReadArchiveEntry(zipBytes, zip, i, stat, entryName,
+                                          archiveSlash == std::wstring::npos ? zipPath : zipPath.substr(archiveSlash + 1),
+                                          password, bytes);
+        if (read == EntryRead::Cancelled) {
+            cancelled = true;  // Esc at the password prompt stops the whole unpack
+            break;
+        }
+        if (read != EntryRead::Ok) {
             LogError(L"Unpack Package: failed extracting \"" + entryName + L"\" from \"" + zipPath + L"\".");
             continue;
         }
-        std::vector<uint8_t> bytes(static_cast<uint8_t*>(data), static_cast<uint8_t*>(data) + extractedSize);
-        mz_free(data);
 
         if (!WriteFileBytes(destPath, bytes)) {
             LogError(L"Unpack Package: could not write \"" + destPath + L"\".");
@@ -691,7 +854,7 @@ int ExtractZipArchive(const std::wstring& zipPath, const std::wstring& destDir, 
 }
 
 void UnpackSelection() {
-    if (!g_host) return;
+    if (!g_host || RefuseProviderPanels(L"Unpack Package")) return;
 
     std::vector<std::wstring> selected = GetSelectedNamesList();
     wchar_t sourceDirBuf[1024] = {};
@@ -746,6 +909,7 @@ void UnpackSelection() {
     ArchiveProgress unpackProgress(L"Unpacking files", 0);
     uint64_t processed = 0;
     bool cancelled = false;
+    zipcrypto::Secret batchPassword;  // ARC-004: tried on every archive of this batch, wiped when it ends
     for (const auto& zipPath : zipPaths) {
         std::wstring thisDest = baseDest;
         if (zipPaths.size() > 1) {
@@ -754,7 +918,7 @@ void UnpackSelection() {
             thisDest = JoinPath(baseDest, StripExtension(fileName));
             EnsureDirectoryExists(thisDest);
         }
-        int extracted = ExtractZipArchive(zipPath, thisDest, unpackProgress, processed, cancelled);
+        int extracted = ExtractZipArchive(zipPath, thisDest, unpackProgress, processed, cancelled, batchPassword);
         totalExtracted += extracted;
         ++archivesProcessed;
         LogInfo(L"Unpack Package: extracted " + std::to_wstring(extracted) + L" item(s) from \"" + zipPath + L"\".");
@@ -783,44 +947,72 @@ void UnpackSelection() {
     g_host->ShowMessage(L"Unpack Package", lines, 1);
 }
 
-// Phase 3: a deliberately small virtual-directory model over ZIP's flat
-// central directory. The archive stays in memory while open; mutations are
-// committed by rewriting a complete replacement archive.
+// Phase 3 / EXT-002 (D4): an open archive is a file-system provider
+// (McFileSystem.h). The HOST shows it in its own panel -- sorting, the
+// filter, Brief view, selection, F3/F5/F6/F7/F8/F2/Shift+F5/Ctrl+A,
+// conflicts, progress and Esc are the host's -- and this code answers the
+// provider calls over a small in-memory model of the archive's flat central
+// directory. Every change only edits the model (ZIP-010); the archive file is
+// rewritten once, by Commit, when the host's "Save changes?" prompt on leaving
+// says so. Provider paths are "/" + the entry name ("/docs/a.txt" is the
+// entry "docs/a.txt"); folders are the "docs/" prefixes (and explicit
+// "docs/" marker entries, IS-0012).
 struct ArchiveEntry {
     std::wstring name;
     std::vector<uint8_t> bytes;
     uint32_t attributes = 0;
     uint64_t compressedSize = 0;
+    uint64_t modifiedUtc = 0;  // FILETIME ticks, 0 = unknown
 };
 struct ArchiveView {
-    bool open = false;
     McPanelSide side = kMcPanelLeft;
-    std::wstring path;
-    std::wstring title;
-    std::wstring folder; // forward-slash prefix, empty at archive root
+    std::wstring path;   // the .zip on disk (also the panel header's root)
+    std::wstring title;  // its file name
     std::vector<ArchiveEntry> entries;
-    std::set<std::wstring> selected;
-    int cursor = 0;
-    int topIndex = 0;
-    int visibleRows = 10;
-    bool mouseSelecting = false;
-    bool mouseSelectValue = false;
-    bool dirty = false;  // IS-0014: true once entries has unsaved changes
+    bool dirty = false;  // IS-0014: unsaved changes in `entries`
+    // ARC-004: the archive had encrypted entries, so a save must encrypt again
+    // (never silently downgrade it to plain), using `password` -- kept in
+    // memory only, wiped when the archive is closed.
+    bool encrypted = false;
+    zipcrypto::Secret password;
 };
-ArchiveView g_views[2];
+std::vector<ArchiveView*> g_archives;  // every archive a panel shows; the host's Close frees one
 
-ArchiveView& ViewFor(McPanelSide side) { return g_views[side == kMcPanelLeft ? 0 : 1]; }
+ArchiveView* ArchiveOnSide(McPanelSide side) {
+    if (!g_host || !g_host->GetPanelProvider) return nullptr;
+    void* context = g_host->GetPanelProvider(side);
+    for (ArchiveView* view : g_archives)
+        if (view == context) return view;
+    return nullptr;
+}
+
 std::wstring FileNameOf(const std::wstring& path) {
     size_t slash = path.find_last_of(L"\\/");
     return slash == std::wstring::npos ? path : path.substr(slash + 1);
 }
+
+uint64_t FileTimeFromUnix(MZ_TIME_T t) {
+    if (t <= 0) return 0;
+    return (static_cast<uint64_t>(t) + 11644473600ull) * 10000000ull;
+}
+MZ_TIME_T UnixFromFileTime(uint64_t ticks) {
+    if (ticks < 116444736000000000ull) return 0;
+    return static_cast<MZ_TIME_T>(ticks / 10000000ull - 11644473600ull);
+}
+
 bool LoadArchive(const std::wstring& path, ArchiveView& view) {
     ArchiveProgress progress(L"Opening ZIP archive", 0);
     progress.Update(0, 0, L"Reading archive from disk...");
     std::vector<uint8_t> zipBytes = ReadFileBytes(path);
     mz_zip_archive zip{};
     if (zipBytes.empty() || !mz_zip_reader_init_mem(&zip, zipBytes.data(), zipBytes.size(), 0)) return false;
-    view.entries.clear();
+    // ARC-004: entries are collected locally and committed only once the whole
+    // archive read (including every password prompt) succeeded, so a cancelled
+    // or failed reload leaves the open archive exactly as it was.
+    std::vector<ArchiveEntry> loaded;
+    zipcrypto::Secret password = std::move(view.password);
+    const std::wstring archiveName = FileNameOf(path);
+    bool anyEncrypted = false, aborted = false;
     for (mz_uint i = 0, count = mz_zip_reader_get_num_files(&zip); i < count; ++i) {
         progress.Update(i, count, L"Reading archive entries...");
         mz_zip_archive_file_stat stat{};
@@ -828,55 +1020,56 @@ bool LoadArchive(const std::wstring& path, ArchiveView& view) {
         std::wstring name = WideFromUtf8(stat.m_filename);
         if (!IsSafeArchiveEntryName(name)) { LogWarning(L"Archive browser: unsafe entry skipped: " + name); continue; }
         if (stat.m_is_directory) {
-            // IS-0012: an explicit empty-directory marker entry (name ends
-            // in '/', zero bytes) -- loaded as a lightweight ArchiveEntry so
-            // one created via F7 survives a save/close/reopen round trip.
-            // CurrentItems already treats any entry whose name contains a
-            // '/' as implying a directory, so no further special-casing is
-            // needed to make it show up correctly.
+            // IS-0012: an explicit empty-directory marker entry (name ends in
+            // '/', zero bytes) -- kept, so one created via F7 survives a
+            // save/close/reopen round trip.
             if (name.empty() || name.back() != L'/') name += L'/';
-            view.entries.push_back(ArchiveEntry{name, {}, stat.m_external_attr, 0});
+            loaded.push_back(ArchiveEntry{name, {}, stat.m_external_attr, 0, FileTimeFromUnix(stat.m_time)});
             continue;
         }
         progress.Update(i, count, name);
-        size_t size = 0;
-        void* data = mz_zip_reader_extract_to_heap(&zip, i, &size, 0);
-        if (!data) { LogWarning(L"Archive browser: could not read " + name); continue; }
-        ArchiveEntry entry{name, std::vector<uint8_t>(static_cast<uint8_t*>(data), static_cast<uint8_t*>(data) + size),
-                           stat.m_external_attr, stat.m_comp_size};
-        mz_free(data);
-        view.entries.push_back(std::move(entry));
+        std::vector<uint8_t> bytes;
+        EntryRead read = ReadArchiveEntry(zipBytes, zip, i, stat, name, archiveName, password, bytes);
+        if (stat.m_is_encrypted) anyEncrypted = true;
+        // An encrypted entry that can't be read must not be silently dropped:
+        // the next save would rewrite the archive without it.
+        if (read == EntryRead::Cancelled || (read == EntryRead::Failed && stat.m_is_encrypted)) { aborted = true; break; }
+        if (read != EntryRead::Ok) { LogWarning(L"Archive browser: could not read " + name); continue; }
+        loaded.push_back(ArchiveEntry{name, std::move(bytes), stat.m_external_attr, stat.m_comp_size,
+                                      FileTimeFromUnix(stat.m_time)});
     }
     mz_zip_reader_end(&zip);
+    view.password = std::move(password);
+    if (aborted) return false;
+    view.entries = std::move(loaded);
+    view.encrypted = anyEncrypted;
     return true;
 }
-// IS-0012: Ctrl+R, this project's own conventional "Refresh" key (see
-// DEVELOPER_GUIDE.md's "Panel content" section) -- re-reads the archive
-// from disk, picking up any external change to the underlying .zip file.
-// LoadArchive only clears view.entries *after* confirming the read
-// succeeded, so a failed reload (file deleted/corrupted externally) leaves
-// the existing in-memory listing intact rather than wiping it.
-void ReloadArchiveFromDisk(ArchiveView& view) {
-    // IS-0014: a reload replaces view.entries wholesale from disk -- without
-    // this check it would silently discard any not-yet-saved edit.
-    if (view.dirty) {
-        const wchar_t* lines[] = {L"This archive has unsaved changes -- reloading discards them."};
-        McDialogOption options[] = {{L'Y', L"Reload anyway"}, {L'N', L"Cancel"}};
-        if (g_host->ShowChoice(L"Refresh", lines, 1, options, 2) != 0) return;
-    }
-    if (LoadArchive(view.path, view)) {
-        view.selected.clear();  // the entry set may have changed
-        view.dirty = false;     // a fresh read from disk; any prior pending edits are gone
-        LogInfo(L"Archive browser: reloaded \"" + view.path + L"\" from disk.");
-    } else {
-        const wchar_t* lines[] = {L"Could not reload the archive -- it may have been deleted or is no longer a valid ZIP file."};
-        g_host->ShowMessage(L"Refresh", lines, 1);
-    }
-}
-bool WriteArchiveEntries(const std::wstring& path, const std::vector<ArchiveEntry>& entries, ArchiveProgress* existing = nullptr) {
+
+bool WriteArchiveEntries(const std::wstring& path, const std::vector<ArchiveEntry>& entries, ArchiveProgress* existing = nullptr,
+                         const zipcrypto::Secret* password = nullptr) {
     ArchiveProgress ownProgress(L"Saving ZIP archive", entries.size(), existing == nullptr);
     auto& progress = existing ? *existing : ownProgress;
     progress.Update(0, entries.size(), L"Rebuilding archive...");
+    if (password && !password->Empty()) {
+        // ARC-004: an archive that was encrypted stays encrypted (AES-256).
+        zipcrypto::ZipBuilder builder(*password, MZ_DEFAULT_LEVEL);
+        size_t done = 0;
+        for (const auto& e : entries) {
+            progress.Update(done++, entries.size(), L"Encrypting: " + e.name);
+            bool directoryMarker = !e.name.empty() && e.name.back() == L'/';
+            if (!builder.Add(Utf8ArchiveName(e.name), e.bytes.data(), e.bytes.size(), e.attributes, directoryMarker,
+                             e.modifiedUtc)) {
+                LogError(L"Archive browser: could not add \"" + e.name + L"\" to the encrypted archive (4 GB / 65,535 entry limit).");
+                return false;
+            }
+        }
+        std::vector<uint8_t> encrypted;
+        progress.Update(entries.size(), entries.size(), L"Finalizing archive...");
+        if (!builder.Finish(encrypted)) return false;
+        progress.Update(entries.size(), entries.size(), L"Writing archive to disk...");
+        return WriteFileBytes(path, encrypted);
+    }
     mz_zip_archive zip{};
     if (!mz_zip_writer_init_heap(&zip, 0, 0)) return false;
     std::vector<uint32_t> attrs;
@@ -885,7 +1078,12 @@ bool WriteArchiveEntries(const std::wstring& path, const std::vector<ArchiveEntr
         progress.Update(attrs.size(), entries.size(), L"Compressing: " + e.name);
         std::string name = Utf8ArchiveName(e.name);
         const void* data = e.bytes.empty() ? static_cast<const void*>("") : e.bytes.data();
-        if (!mz_zip_writer_add_mem(&zip, name.c_str(), data, e.bytes.size(), MZ_DEFAULT_LEVEL)) { ok = false; break; }
+        MZ_TIME_T modified = UnixFromFileTime(e.modifiedUtc);
+        if (!mz_zip_writer_add_mem_ex_v2(&zip, name.c_str(), data, e.bytes.size(), nullptr, 0, MZ_DEFAULT_LEVEL, 0, 0,
+                                         modified ? &modified : nullptr, nullptr, 0, nullptr, 0)) {
+            ok = false;
+            break;
+        }
         attrs.push_back(e.attributes);
     }
     void* heap = nullptr; size_t bytes = 0;
@@ -899,561 +1097,404 @@ bool WriteArchiveEntries(const std::wstring& path, const std::vector<ArchiveEntr
     progress.Update(entries.size(), entries.size(), L"Writing archive to disk...");
     return WriteFileBytes(path, archive);
 }
-// IS-0014: updates the in-memory listing and marks it unsaved -- deliberately
-// no disk write here. Every mutating operation in this file (add/delete/
-// attribute-toggle/create-directory/move-out) used to call WriteArchiveEntries
-// immediately, repacking the *entire* archive on every single edit; now they
-// all funnel through this instead, and the actual repack-and-write happens
-// only once, via SaveArchiveIfDirty below, when the user leaves the archive.
-void ApplyArchiveChanges(ArchiveView& view, std::vector<ArchiveEntry> replacement) {
-    view.entries = std::move(replacement);
-    view.dirty = true;
-}
-// The one place an actual repack-and-write happens for these deferred edits
-// (Pack/Unpack's own one-shot operations are unrelated and unaffected). A
-// no-op returning true if nothing is pending, so callers can call this
-// unconditionally without checking `dirty` themselves first.
-bool SaveArchiveIfDirty(ArchiveView& view, ArchiveProgress* existing = nullptr) {
+
+// The one place the archive file is rewritten (ZIP-010): the host's Commit,
+// after the user chose Save on leaving (or quitting).
+bool SaveArchiveIfDirty(ArchiveView& view) {
     if (!view.dirty) return true;
-    if (!WriteArchiveEntries(view.path, view.entries, existing)) return false;
+    // ARC-004: never write an encrypted archive back as a plain one. If the
+    // password was lost (a failed reload cleared it), ask for it again.
+    if (view.encrypted && view.password.Empty() && !AskArchivePassword(view.title, false, view.password)) return false;
+    if (!WriteArchiveEntries(view.path, view.entries, nullptr, view.encrypted ? &view.password : nullptr)) return false;
     view.dirty = false;
     return true;
 }
-struct ViewItem { std::wstring label, key; bool directory = false; uint64_t size = 0, compressed = 0; uint32_t attrs = 0; };
-std::vector<ViewItem> CurrentItems(const ArchiveView& view) {
-    std::vector<ViewItem> result;
-    if (!view.folder.empty()) result.push_back({L"..", L"..", true});
-    std::set<std::wstring> dirs;
-    for (const auto& e : view.entries) {
-        if (e.name.rfind(view.folder, 0) != 0) continue;
-        std::wstring rest = e.name.substr(view.folder.size());
-        size_t slash = rest.find(L'/');
-        if (slash != std::wstring::npos) dirs.insert(rest.substr(0, slash));
-        else result.push_back({rest, e.name, false, e.bytes.size(), e.compressedSize, e.attributes});
-    }
-    std::transform(dirs.begin(), dirs.end(), std::back_inserter(result),
-                   [&](const std::wstring& dir) { return ViewItem{dir, view.folder + dir + L"/", true}; });
-    std::stable_sort(result.begin() + (view.folder.empty() ? 0 : 1), result.end(), [](const ViewItem& a, const ViewItem& b) {
-        if (a.directory != b.directory) return a.directory > b.directory;
-        return _wcsicmp(a.label.c_str(), b.label.c_str()) < 0;
-    });
-    return result;
-}
-std::vector<std::wstring> SelectedPrefixes(const ArchiveView& view, const std::vector<ViewItem>& items) {
-    std::vector<std::wstring> selected;
-    for (const auto& item : items) {
-        if (item.key == L"..") continue;
-        if (view.selected.count(item.key))
-            selected.push_back(item.key);
-    }
-    if (selected.empty() && view.cursor >= 0 && view.cursor < (int)items.size() && items[view.cursor].key != L"..")
-        selected.push_back(items[view.cursor].key);
-    return selected;
-}
-bool MatchesAny(const std::wstring& name, const std::vector<std::wstring>& prefixes) {
-    for (const auto& p : prefixes) if (name == p || (!p.empty() && p.back() == L'/' && name.rfind(p, 0) == 0)) return true;
-    return false;
-}
-void ClampArchiveCursor(ArchiveView& view, int itemCount) {
-    view.cursor = std::clamp(view.cursor, 0, std::max(0, itemCount - 1));
-    if (view.cursor < view.topIndex) view.topIndex = view.cursor;
-    if (view.cursor >= view.topIndex + view.visibleRows)
-        view.topIndex = view.cursor - view.visibleRows + 1;
-    view.topIndex = std::clamp(view.topIndex, 0, std::max(0, itemCount - view.visibleRows));
-}
-struct ArchiveColumns {
-    size_t markerWidth = 0;
-    size_t nameWidth = 0;
-    int detailCount = 0;
-};
-constexpr size_t kArchiveDetailWidths[] = {10, 10, 8};
-ArchiveColumns FitArchiveColumns(size_t width) {
-    ArchiveColumns columns{std::min<size_t>(3, width), 0, 3};
-    size_t reserved = std::accumulate(std::begin(kArchiveDetailWidths), std::end(kArchiveDetailWidths), columns.markerWidth,
-                                      [](size_t sum, size_t detailWidth) { return sum + 1 + detailWidth; });
-    // Keep a usable name field; drop attributes, then packed size, then size.
-    while (columns.detailCount && width < reserved + 8) {
-        reserved -= 1 + kArchiveDetailWidths[--columns.detailCount];
-    }
-    columns.nameWidth = width - reserved;
-    return columns;
-}
-std::wstring ArchiveRightAlign(const std::wstring& text, size_t width) {
-    std::wstring trimmed = mc::PadToDisplayWidth(text, width);
-    size_t used = std::min<size_t>(width, mc::StringDisplayWidth(text));
-    return std::wstring(width - used, L' ') + trimmed.substr(0, trimmed.size() - (width - used));
-}
-// Mirrors the host's own main.cpp FormatAttributes -- this plugin links no
-// host internals, so the 4-char R/H/S/A convention is duplicated here rather
-// than shared, matching how JoinPath/FolderNameOf are already duplicated
-// small helpers rather than host dependencies.
-std::wstring FormatZipAttributes(uint32_t attrs) {
-    std::wstring s = L"----";
-    if (attrs & FILE_ATTRIBUTE_READONLY) s[0] = L'R';
-    if (attrs & FILE_ATTRIBUTE_HIDDEN) s[1] = L'H';
-    if (attrs & FILE_ATTRIBUTE_SYSTEM) s[2] = L'S';
-    if (attrs & FILE_ATTRIBUTE_ARCHIVE) s[3] = L'A';
-    return s;
-}
-std::wstring FormatArchiveLine(const ArchiveColumns& columns, const std::wstring& marker,
-                               const std::wstring& name, const std::wstring& size,
-                               const std::wstring& packed, const std::wstring& attributes) {
-    std::wstring line = mc::PadToDisplayWidth(marker, columns.markerWidth) +
-                        mc::PadToDisplayWidth(name, columns.nameWidth);
-    const std::wstring* details[] = {&size, &packed, &attributes};
-    for (int i = 0; i < columns.detailCount; ++i)
-        line += L" " + ArchiveRightAlign(*details[i], kArchiveDetailWidths[i]);
-    return line;
-}
-void DrawArchive(McPanelSide side, uint16_t width, uint16_t height, bool active) {
-    ArchiveView& view = ViewFor(side); if (!view.open || !g_host) return;
-    auto items = CurrentItems(view);
-    view.visibleRows = std::max(1, (int)height - 1);
-    ClampArchiveCursor(view, (int)items.size());
-    const auto columns = FitArchiveColumns(width);
-    // IS-0014: a cheap, self-contained "unsaved changes" marker -- no host/
-    // SDK change needed, since this is drawn the same way every other row
-    // already is.
-    std::wstring header = FormatArchiveLine(columns, L"", view.dirty ? L"Name *" : L"Name", L"Size", L"Packed", L"Attr");
-    g_host->PanelDrawText(side, 0, 0, header.c_str(), kMcPanelColorSection);
-    int rows = std::max(0, (int)height - 1), first = view.topIndex;
-    for (int row = 0; row < rows && first + row < (int)items.size(); ++row) {
-        const auto& item = items[first + row];
-        bool atCursor = active && first + row == view.cursor;
-        std::wstring marker = atCursor ? L">" : L" ";
-        marker += view.selected.count(item.key) ? L"* " : L"  ";
-        std::wstring attributes = item.directory ? L"" : FormatZipAttributes(item.attrs);
-        std::wstring line = FormatArchiveLine(columns, marker,
-            item.label + (item.directory ? L"/" : L""),
-            item.directory ? L"<DIR>" : std::to_wstring(item.size),
-            item.directory ? L"" : std::to_wstring(item.compressed), attributes);
-        g_host->PanelDrawText(side, 0, (int16_t)(row + 1), line.c_str(), atCursor ? kMcPanelColorHighlight :
-                              (view.selected.count(item.key) ? kMcPanelColorSelected :
-                               (item.directory ? kMcPanelColorSection : kMcPanelColorNormal)));
-    }
-}
-void LeaveOrUp(ArchiveView& view) {
-    if (!view.folder.empty()) { size_t end = view.folder.size() - 1, slash = view.folder.find_last_of(L'/', end - 1); view.folder = slash == std::wstring::npos ? L"" : view.folder.substr(0, slash + 1); view.cursor = 0; return; }
-    if (!view.dirty) {
-        // ZIP-007's own plain confirmation, unchanged -- nothing pending to save.
-        std::wstring question = L"Leave " + view.title + L"?";
-        const wchar_t* lines[] = {question.c_str()}; McDialogOption options[] = {{L'Y', L"Yes"}, {L'N', L"No"}};
-        if (g_host->ShowChoice(L"Leave archive", lines, 1, options, 2) == 0) { g_host->ReleasePanelContent(view.side); view = ArchiveView{}; }
-        return;
-    }
-    // IS-0014: dirty -- the only point any of this archive's deferred edits
-    // actually get saved (or discarded) is right here.
-    const wchar_t* lines[] = {L"This archive has unsaved changes."};
-    McDialogOption options[] = {{L'Y', L"Save and leave"}, {L'N', L"Discard and leave"}, {L'C', L"Cancel"}};
-    int choice = g_host->ShowChoice(L"Leave archive", lines, 1, options, 3);
-    if (choice == 0) {
-        if (!SaveArchiveIfDirty(view)) {
-            const wchar_t* err[] = {L"Could not save the archive -- staying open so nothing is lost."};
-            g_host->ShowMessage(L"Leave archive", err, 1);
-            return;  // stay open, still dirty -- let the user retry or discard next time
-        }
-        g_host->ReleasePanelContent(view.side);
-        view = ArchiveView{};
-    } else if (choice == 1) {
-        g_host->ReleasePanelContent(view.side);
-        view = ArchiveView{};  // discard -- the on-disk file was never touched, nothing to undo
-    }
-    // choice == 2 or Esc (-1): Cancel -- stay, change nothing.
-}
-void ExtractOrMove(ArchiveView& view, bool move) {
-    auto items = CurrentItems(view); auto prefixes = SelectedPrefixes(view, items); if (prefixes.empty()) return;
-    McPanelSide other = view.side == kMcPanelLeft ? kMcPanelRight : kMcPanelLeft; wchar_t dest[1024] = {}; g_host->GetPanelPath(other, dest, 1024);
-    const auto total = std::count_if(view.entries.begin(), view.entries.end(), [&](const ArchiveEntry& e) { return MatchesAny(e.name, prefixes); });
-    ArchiveProgress progress(move ? L"Moving from ZIP archive" : L"Copying from ZIP archive", total);
-    uint64_t processed = 0;
-    int written = 0; std::set<std::wstring> movedNames;
-    enum class Blanket { None, OverwriteAll, SkipAll } blanket = Blanket::None;
-    for (const auto& e : view.entries) if (MatchesAny(e.name, prefixes)) {
-        // IS-0010: poll Esc every item, the same shape as FileOps.h's own
-        // CancelPoll, so cancelling mid-extraction actually stops the loop
-        // instead of the keypress sitting unconsumed until it finishes.
-        if (g_host->PollCancel && g_host->PollCancel()) break;
-        progress.Update(processed++, total, e.name);
-        std::wstring rel = e.name.substr(view.folder.size()); std::replace(rel.begin(), rel.end(), L'/', L'\\'); std::wstring out = JoinPath(dest, rel);
-        // IS-0012: a directory-marker entry (name ends in '/', zero bytes --
-        // e.g. one created via F7) has no real content to write; just
-        // ensure the directory itself exists on the destination side.
-        if (!e.name.empty() && e.name.back() == L'/') {
-            while (!out.empty() && out.back() == L'\\') out.pop_back();
-            EnsureDirectoryExists(out);
-            if (move) movedNames.insert(e.name);
-            continue;
-        }
-        if (GetFileAttributesW(out.c_str()) != INVALID_FILE_ATTRIBUTES) {
-            if (blanket == Blanket::SkipAll) continue;
-            if (blanket != Blanket::OverwriteAll) {
-                const wchar_t* lines[] = {L"Destination already exists:", out.c_str()};
-                McDialogOption options[] = {{L'O', L"Overwrite"}, {L'A', L"Overwrite all"}, {L'S', L"Skip"},
-                                             {L'K', L"Skip all"}, {L'C', L"Cancel"}};
-                int choice = g_host->ShowChoice(L"Extract from archive", lines, 2, options, 5);
-                if (choice == 4 || choice < 0) break;
-                else if (choice == 1) blanket = Blanket::OverwriteAll;
-                else if (choice == 2) continue;
-                else if (choice == 3) { blanket = Blanket::SkipAll; continue; }
-                // choice == 0: overwrite this one only, fall through to write below.
-            }
-        }
-        size_t slash = out.find_last_of(L'\\'); if (slash != std::wstring::npos) EnsureDirectoryExists(out.substr(0, slash));
-        if (WriteFileBytes(out, e.bytes)) { constexpr uint32_t settable = FILE_ATTRIBUTE_READONLY | FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM | FILE_ATTRIBUTE_ARCHIVE; if (e.attributes & settable) SetFileAttributesW(out.c_str(), e.attributes & settable); ++written; movedNames.insert(e.name); }
-        else { const wchar_t* lines[] = {L"Could not write destination:", out.c_str()}; g_host->ShowMessage(L"Extract from archive", lines, 2); }
-    }
-    progress.Update(processed, total, L"Refreshing destination...");
-    g_host->RefreshPanel(other);
-    if (move && !movedNames.empty()) {
-        // IS-0014: deferred -- the moved files are already safely on the
-        // real filesystem; whether the archive's own shrunk copy is written
-        // now or when the archive is left no longer matters for safety.
-        auto replacement = view.entries;
-        replacement.erase(std::remove_if(replacement.begin(), replacement.end(), [&](const ArchiveEntry& e) { return movedNames.count(e.name) != 0; }), replacement.end());
-        ApplyArchiveChanges(view, std::move(replacement));
-        view.selected.clear();
-    } else if (!move && written > 0) {
-        // Match the host's own Copy convention: a completed copy clears the
-        // source selection, even though (unlike Move) the archive itself is
-        // unchanged.
-        view.selected.clear();
-    }
-}
-void ViewArchiveFile(ArchiveView& view) {
-    auto items = CurrentItems(view);
-    if (items.empty() || items[view.cursor].directory) return;
-    const auto& key = items[view.cursor].key;
-    auto entry = std::find_if(view.entries.begin(), view.entries.end(), [&](const ArchiveEntry& e) { return e.name == key; });
-    if (entry == view.entries.end() || !g_host->ShowFileViewer) return;
-    wchar_t dir[MAX_PATH], path[MAX_PATH];
-    if (!GetTempPathW(MAX_PATH, dir) || !GetTempFileNameW(dir, L"mcz", 0, path)) return;
-    if (WriteFileBytes(path, entry->bytes)) g_host->ShowFileViewer(path);
-    DeleteFileW(path);
-}
-void ChangeArchiveAttributes(ArchiveView& view) {
-    auto prefixes = SelectedPrefixes(view, CurrentItems(view));
-    if (prefixes.empty()) return;
-    const wchar_t* lines[] = {L"Toggle an attribute on the selected archive files."};
-    McDialogOption options[] = {{L'R', L"Read-only"}, {L'H', L"Hidden"}, {L'S', L"System"}, {L'A', L"Archive"}, {L'C', L"Cancel"}};
-    int choice = g_host->ShowChoice(L"Archive attributes", lines, 1, options, 5);
-    if (choice < 0 || choice >= 4) return;
-    const uint32_t flags[] = {FILE_ATTRIBUTE_READONLY, FILE_ATTRIBUTE_HIDDEN, FILE_ATTRIBUTE_SYSTEM, FILE_ATTRIBUTE_ARCHIVE};
-    auto replacement = view.entries;
-    for (auto& e : replacement) if (MatchesAny(e.name, prefixes)) e.attributes ^= flags[choice];
-    ApplyArchiveChanges(view, std::move(replacement));  // IS-0014: deferred -- saved when leaving the archive
-}
-void DeleteFromArchive(ArchiveView& view) {
-    auto prefixes = SelectedPrefixes(view, CurrentItems(view)); if (prefixes.empty()) return;
-    const wchar_t* lines[] = {L"Delete selected archive entries permanently?"}; McDialogOption options[] = {{L'Y', L"Yes"}, {L'N', L"No"}};
-    if (g_host->ShowChoice(L"Delete from archive", lines, 1, options, 2) != 0) return;
-    // IS-0014: deferred -- an in-memory erase is instant, no progress dialog
-    // needed now that this no longer repacks the archive immediately.
-    auto replacement = view.entries;
-    auto oldSize = replacement.size(); replacement.erase(std::remove_if(replacement.begin(), replacement.end(), [&](const ArchiveEntry& e) { return MatchesAny(e.name, prefixes); }), replacement.end());
-    auto deletedCount = oldSize - replacement.size();
-    ApplyArchiveChanges(view, std::move(replacement));
-    view.selected.clear(); view.cursor = 0;
-    LogInfo(L"Archive browser: deleted " + std::to_wstring(deletedCount) + L" item(s) (not yet saved).");
-}
 
-// IS-0012: F7, "Create directory" -- adds a real, persisted empty-directory
-// marker entry (name ends in '/', zero bytes; see LoadArchive's own comment
-// on why this round-trips correctly as a directory through miniz and any
-// other zip tool), not a purely virtual folder that would vanish if the
-// user never adds a file to it.
-void CreateDirectoryInArchive(ArchiveView& view) {
-    wchar_t nameBuffer[260] = {};
-    if (!g_host->ShowTextPrompt(L"Create directory", L"", nameBuffer, 260)) return;
-    std::wstring name = nameBuffer;
-    while (!name.empty() && (name.back() == L'/' || name.back() == L'\\')) name.pop_back();
-    if (name.empty() || name.find(L'/') != std::wstring::npos || name.find(L'\\') != std::wstring::npos || name == L"..") {
-        const wchar_t* lines[] = {L"Enter a single directory name (no / or \\), not a path."};
-        g_host->ShowMessage(L"Create directory", lines, 1);
-        return;
-    }
+// --- names ------------------------------------------------------------------------
 
-    auto items = CurrentItems(view);
-    for (const auto& item : items) {
-        if (item.key == L"..") continue;
-        if (_wcsicmp(item.label.c_str(), name.c_str()) != 0) continue;
-        if (!item.directory) {
-            const wchar_t* lines[] = {L"A file with that name already exists here."};
-            g_host->ShowMessage(L"Create directory", lines, 1);
-            return;
-        }
-        // Already exists as a directory -- a harmless no-op; just move the
-        // cursor onto it rather than writing a duplicate marker entry.
-        for (size_t i = 0; i < items.size(); ++i) {
-            if (items[i].key == item.key) { view.cursor = static_cast<int>(i); break; }
-        }
-        return;
-    }
-
-    std::wstring fullName = view.folder + name + L"/";
-    auto replacement = view.entries;
-    replacement.push_back(ArchiveEntry{fullName, {}, FILE_ATTRIBUTE_DIRECTORY, 0});
-    ApplyArchiveChanges(view, std::move(replacement));  // IS-0014: deferred -- saved when leaving the archive
-    LogInfo(L"Archive browser: created directory \"" + fullName + L"\" (not yet saved).");
-
-    // IS-0001's own convention: a newly created item is selected (cursor
-    // lands on it) once the listing reflects the change.
-    auto refreshed = CurrentItems(view);
-    for (size_t i = 0; i < refreshed.size(); ++i) {
-        if (refreshed[i].directory && _wcsicmp(refreshed[i].label.c_str(), name.c_str()) == 0) {
-            view.cursor = static_cast<int>(i);
-            break;
-        }
-    }
-}
-
-// FEA-0008 (ZIP-011): Shift+F5 inside an archive -- copy the cursor entry
-// under a new name or relative path, *within* the archive. Purely in memory,
-// deferred through ApplyArchiveChanges like every other archive edit
-// (ZIP-010). Mirrors the host's own file-panel Shift+F5 (FOP-019,
-// ResolveCopyAsTarget): a name lands beside the original, an existing folder
-// or a trailing slash means "inside it, keeping the name".
+bool SameNoCase(const std::wstring& a, const std::wstring& b) { return _wcsicmp(a.c_str(), b.c_str()) == 0; }
 bool StartsWithNoCase(const std::wstring& s, const std::wstring& prefix) {
     return s.size() >= prefix.size() && _wcsnicmp(s.c_str(), prefix.c_str(), prefix.size()) == 0;
 }
-bool ArchiveFolderExists(const std::vector<ArchiveEntry>& entries, const std::wstring& prefix) {
-    return std::any_of(entries.begin(), entries.end(),
-                       [&](const ArchiveEntry& e) { return StartsWithNoCase(e.name, prefix); });
+
+// "/docs/a.txt" -> "docs/a.txt"; "/" -> "".
+std::wstring KeyOf(const wchar_t* path) {
+    std::wstring key = path ? path : L"";
+    while (!key.empty() && key.front() == L'/') key.erase(0, 1);
+    while (!key.empty() && key.back() == L'/') key.pop_back();
+    return key;
 }
-int FindArchiveEntryNoCase(const std::vector<ArchiveEntry>& entries, const std::wstring& name) {
-    for (size_t i = 0; i < entries.size(); ++i)
-        if (_wcsicmp(entries[i].name.c_str(), name.c_str()) == 0) return static_cast<int>(i);
+// The prefix every entry inside folder `key` starts with ("" for the root).
+std::wstring PrefixOf(const std::wstring& key) { return key.empty() ? key : key + L"/"; }
+
+int FindFile(const ArchiveView& view, const std::wstring& key) {
+    for (size_t i = 0; i < view.entries.size(); ++i)
+        if (SameNoCase(view.entries[i].name, key)) return static_cast<int>(i);
     return -1;
 }
+bool FolderExists(const ArchiveView& view, const std::wstring& key) {
+    if (key.empty()) return true;
+    std::wstring prefix = PrefixOf(key);
+    return std::any_of(view.entries.begin(), view.entries.end(),
+                       [&](const ArchiveEntry& e) { return StartsWithNoCase(e.name, prefix); });
+}
+int FindMarker(const ArchiveView& view, const std::wstring& key) { return FindFile(view, PrefixOf(key)); }
 
-// `targetKey` empty with no `error` means "nothing to do" (empty input).
-struct ArchiveCopyTarget { std::wstring targetKey; std::wstring error; };
+// --- the provider -----------------------------------------------------------------
 
-// Resolves what the user typed, relative to `folder` (the archive's current
-// forward-slash folder prefix), into the full archive name a copy of
-// `sourceKey` (a file "a/b.txt" or a folder "a/b/") would get. Comparisons
-// are case-insensitive, since the archive's names land on a Windows file
-// system once extracted, where "A.txt" and "a.txt" collide.
-ArchiveCopyTarget ResolveArchiveCopyTarget(const std::vector<ArchiveEntry>& entries, const std::wstring& folder,
-                                           const std::wstring& sourceKey, const std::wstring& typed) {
-    std::wstring s = typed;
-    size_t start = s.find_first_not_of(L" \t");
-    if (start == std::wstring::npos) return {};
-    s = s.substr(start, s.find_last_not_of(L" \t") - start + 1);
-    if (s.size() >= 2 && s.front() == L'"' && s.back() == L'"') s = s.substr(1, s.size() - 2);
-    std::replace(s.begin(), s.end(), L'\\', L'/');
-    bool into = false;
-    while (!s.empty() && s.back() == L'/') { s.pop_back(); into = true; }
-    if (s.empty()) return {};
+ArchiveView& A(void* context) { return *static_cast<ArchiveView*>(context); }
 
-    const std::wstring kOutside = L"Enter a name or a path inside the archive (no drive, leading slash, . or ..).";
-    if (!IsSafeArchiveEntryName(s)) return {L"", kOutside};
-    for (size_t pos = 0; pos <= s.size();) {
-        size_t slash = s.find(L'/', pos);
-        std::wstring segment = s.substr(pos, slash == std::wstring::npos ? std::wstring::npos : slash - pos);
-        if (segment.empty() || segment == L".") return {L"", kOutside};
-        if (slash == std::wstring::npos) break;
-        pos = slash + 1;
-    }
-
-    bool sourceIsDir = !sourceKey.empty() && sourceKey.back() == L'/';
-    std::wstring trimmedSource = sourceIsDir ? sourceKey.substr(0, sourceKey.size() - 1) : sourceKey;
-    size_t lastSlash = trimmedSource.find_last_of(L'/');
-    std::wstring leaf = lastSlash == std::wstring::npos ? trimmedSource : trimmedSource.substr(lastSlash + 1);
-
-    std::wstring candidate = folder + s;
-    if (!into && ArchiveFolderExists(entries, candidate + L"/") && _wcsicmp((candidate + L"/").c_str(), sourceKey.c_str()) != 0)
-        into = true;
-    std::wstring target = into ? candidate + L"/" + leaf : candidate;
-    if (sourceIsDir) target += L"/";
-
-    if (_wcsicmp(target.c_str(), sourceKey.c_str()) == 0) return {L"", L"The new name is the same as the original."};
-    if (sourceIsDir && StartsWithNoCase(target, sourceKey)) return {L"", L"Cannot place a directory inside itself."};
-
-    // A file standing where the target (or one of its parent folders) would go.
-    std::wstring bare = sourceIsDir ? target.substr(0, target.size() - 1) : target;
-    for (size_t slash = bare.find(L'/'); ; slash = bare.find(L'/', slash + 1)) {
-        std::wstring prefix = slash == std::wstring::npos ? bare : bare.substr(0, slash);
-        bool isLast = slash == std::wstring::npos;
-        if (!(isLast && !sourceIsDir) && FindArchiveEntryNoCase(entries, prefix) >= 0)
-            return {L"", L"A file named \"" + prefix + L"\" is in the way."};
-        if (isLast) break;
-    }
-    if (!sourceIsDir && ArchiveFolderExists(entries, target + L"/"))
-        return {L"", L"A folder with that name already exists here."};
-    return {target, L""};
+void PutError(const std::wstring& text, wchar_t* error, int32_t size) {
+    if (error && size > 0) wcsncpy_s(error, static_cast<size_t>(size), text.c_str(), _TRUNCATE);
 }
 
-// The (source name, target name) entry pairs copying `sourceKey` to
-// `targetKey` produces: one pair for a file, every entry under the prefix
-// (its own "dir/" marker included, if any) for a folder.
-std::vector<std::pair<std::wstring, std::wstring>> PlanArchiveCopy(const std::vector<ArchiveEntry>& entries,
-                                                                   const std::wstring& sourceKey,
-                                                                   const std::wstring& targetKey) {
-    std::vector<std::pair<std::wstring, std::wstring>> plan;
-    bool sourceIsDir = !sourceKey.empty() && sourceKey.back() == L'/';
-    for (const auto& e : entries) {
-        if (sourceIsDir ? e.name.rfind(sourceKey, 0) == 0 : e.name == sourceKey)
-            plan.emplace_back(e.name, targetKey + e.name.substr(sourceKey.size()));
-    }
-    return plan;
+void EmitEntry(McFsEntrySink sink, void* sinkContext, const std::wstring& name, bool directory, uint64_t size,
+               uint32_t attributes, uint64_t modified) {
+    McFsEntry e{};
+    e.structSize = sizeof(McFsEntry);
+    e.name = name.c_str();
+    e.isDirectory = directory;
+    e.size = size;
+    e.attributes = directory ? (attributes | FILE_ATTRIBUTE_DIRECTORY) : attributes;
+    e.modifiedUtc = modified;
+    sink(sinkContext, &e);
 }
 
-void CopyWithinArchive(ArchiveView& view) {
-    auto items = CurrentItems(view);
-    if (items.empty() || view.cursor < 0 || view.cursor >= (int)items.size()) return;
-    const ViewItem item = items[view.cursor];
-    if (item.key == L"..") return;
-
-    std::wstring title = L"Copy \"" + item.label + L"\" as:";
-    wchar_t buffer[1024] = {};
-    if (!g_host->ShowTextPrompt(title.c_str(), item.label.c_str(), buffer, 1024)) return;
-
-    auto target = ResolveArchiveCopyTarget(view.entries, view.folder, item.key, buffer);
-    if (!target.error.empty()) {
-        const wchar_t* lines[] = {target.error.c_str()};
-        g_host->ShowMessage(L"Copy in archive", lines, 1);
-        return;
+McFsStatus __stdcall ZipList(void* context, const wchar_t* dir, McFsEntrySink sink, void* sinkContext, wchar_t* error,
+                             int32_t errorSize) {
+    ArchiveView& view = A(context);
+    std::wstring key = KeyOf(dir);
+    if (!FolderExists(view, key)) {
+        PutError(L"No such folder in the archive: " + key, error, errorSize);
+        return kMcFsNotFound;
     }
-    if (target.targetKey.empty()) return;
-    auto plan = PlanArchiveCopy(view.entries, item.key, target.targetKey);
-    if (plan.empty()) return;
-
-    const auto conflicts = std::count_if(plan.begin(), plan.end(), [&](const auto& step) {
-        return step.second.back() != L'/' && FindArchiveEntryNoCase(view.entries, step.second) >= 0;
-    });
-    bool overwrite = false;
-    if (conflicts > 0) {
-        std::wstring line = std::to_wstring(conflicts) + L" item(s) already exist at the target.";
-        const wchar_t* lines[] = {line.c_str()};
-        McDialogOption options[] = {{L'O', L"Overwrite"}, {L'S', L"Skip existing"}, {L'C', L"Cancel"}};
-        int choice = g_host->ShowChoice(L"Copy in archive", lines, 1, options, 3);
-        if (choice != 0 && choice != 1) return;
-        overwrite = choice == 0;
-    }
-
-    auto replacement = view.entries;
-    int copied = 0;
-    for (const auto& [srcName, dstName] : plan) {
-        int srcIndex = -1;
-        for (size_t i = 0; i < view.entries.size(); ++i) if (view.entries[i].name == srcName) { srcIndex = (int)i; break; }
-        if (srcIndex < 0) continue;
-        const ArchiveEntry& src = view.entries[(size_t)srcIndex];
-        int existing = FindArchiveEntryNoCase(replacement, dstName);
-        if (existing >= 0) {
-            if (dstName.back() == L'/' || !overwrite) continue;  // folder marker already there / skip
-            replacement[(size_t)existing].bytes = src.bytes;
-            replacement[(size_t)existing].attributes = src.attributes;
-            replacement[(size_t)existing].compressedSize = 0;
-            ++copied;
+    std::wstring prefix = PrefixOf(key);
+    struct Folder { std::wstring name; uint32_t attributes = 0; uint64_t modified = 0; };
+    std::vector<Folder> folders;
+    for (const auto& e : view.entries) {
+        if (!StartsWithNoCase(e.name, prefix)) continue;
+        std::wstring rest = e.name.substr(prefix.size());
+        if (rest.empty()) continue;  // this folder's own marker
+        size_t slash = rest.find(L'/');
+        if (slash == std::wstring::npos) {
+            EmitEntry(sink, sinkContext, rest, false, e.bytes.size(), e.attributes, e.modifiedUtc);
             continue;
         }
-        replacement.push_back(ArchiveEntry{dstName, src.bytes, src.attributes, 0});
-        ++copied;
-    }
-    if (copied == 0) return;
-    ApplyArchiveChanges(view, std::move(replacement));  // IS-0014: deferred -- saved when leaving the archive
-    LogInfo(L"Archive browser: copied \"" + item.key + L"\" to \"" + target.targetKey + L"\" (not yet saved).");
-
-    // IS-0001 convention: the cursor lands on the new copy when it's in the current folder.
-    auto refreshed = CurrentItems(view);
-    for (size_t i = 0; i < refreshed.size(); ++i) {
-        if (_wcsicmp(refreshed[i].key.c_str(), target.targetKey.c_str()) == 0) {
-            view.cursor = static_cast<int>(i);
-            break;
+        std::wstring folder = rest.substr(0, slash);
+        auto it = std::find_if(folders.begin(), folders.end(), [&](const Folder& f) { return SameNoCase(f.name, folder); });
+        if (it == folders.end()) it = folders.insert(folders.end(), Folder{folder});
+        if (slash + 1 == rest.size()) {  // the folder's explicit marker: its attributes and time
+            it->attributes = e.attributes & ~static_cast<uint32_t>(FILE_ATTRIBUTE_DIRECTORY);
+            it->modified = e.modifiedUtc;
         }
     }
+    for (const auto& f : folders) EmitEntry(sink, sinkContext, f.name, true, 0, f.attributes, f.modified);
+    return kMcFsOk;
 }
 
-// Adds `other`'s selection into `view`'s archive. Factored out from
-// AddOtherPanelSelection (Shift+Insert, which always computes `other` as
-// this archive panel's own complement side) so McPlugin_OnReceiveFiles
-// (IS-0011 follow-up: F5 Copy onto an open archive) can reuse the exact
-// same logic with a host-supplied source side instead.
-void AddFilesFromPanel(ArchiveView& view, McPanelSide other) {
-    int count = g_host->GetPanelSelectedNames(other, nullptr, 0, 0);
-    if (count <= 0) {
-        const wchar_t* lines[] = {L"Nothing selected in the other panel to add."};
-        g_host->ShowMessage(L"Add to archive", lines, 1);
-        return;
+McFsStatus __stdcall ZipStat(void* context, const wchar_t* path, McFsEntrySink sink, void* sinkContext, wchar_t* error,
+                             int32_t errorSize) {
+    ArchiveView& view = A(context);
+    std::wstring key = KeyOf(path);
+    std::wstring leaf = key.substr(key.find_last_of(L'/') == std::wstring::npos ? 0 : key.find_last_of(L'/') + 1);
+    if (key.empty()) {
+        EmitEntry(sink, sinkContext, L"/", true, 0, 0, 0);
+        return kMcFsOk;
     }
-    std::vector<std::wstring> rawBuffers(count, std::wstring(1024, L'\0'));
-    std::vector<wchar_t*> ptrs(count);
-    for (int i = 0; i < count; ++i) ptrs[i] = rawBuffers[i].data();
-    g_host->GetPanelSelectedNames(other, ptrs.data(), count, 1024);
-    // IS-0011: GetPanelSelectedNames writes a null-terminated name into each
-    // raw buffer but never shrinks the std::wstring's own length -- iterating
-    // `rawBuffers` directly (as earlier code here did) leaves every name a
-    // 1024-char string padded with embedded NULs past the real text. Every
-    // WinAPI call that follows (GetFileAttributesW, CreateFileW,
-    // WideCharToMultiByte in Utf8ArchiveName) still "works" because those
-    // stop at the first embedded NUL, but plain wstring operations (operator+,
-    // std::set's operator<) don't, so the garbage-padded name ends up stored
-    // as the actual ArchiveEntry.name -- visibly corrupting the panel row
-    // until the archive is closed and reopened, and defeating the duplicate
-    // check below. Reconstructing via the wchar_t* constructor (the same
-    // fix GetSelectedNamesList() above already applies) trims each name back
-    // down to its real length.
-    std::vector<std::wstring> names_selected;
-    names_selected.reserve(static_cast<size_t>(count));
-    for (int i = 0; i < count; ++i) names_selected.emplace_back(ptrs[i]);
+    int file = FindFile(view, key);
+    if (file >= 0) {
+        const ArchiveEntry& e = view.entries[static_cast<size_t>(file)];
+        EmitEntry(sink, sinkContext, leaf, false, e.bytes.size(), e.attributes, e.modifiedUtc);
+        return kMcFsOk;
+    }
+    if (FolderExists(view, key)) {
+        int marker = FindMarker(view, key);
+        uint32_t attrs = marker >= 0 ? view.entries[static_cast<size_t>(marker)].attributes : 0;
+        uint64_t modified = marker >= 0 ? view.entries[static_cast<size_t>(marker)].modifiedUtc : 0;
+        EmitEntry(sink, sinkContext, leaf, true, 0, attrs & ~static_cast<uint32_t>(FILE_ATTRIBUTE_DIRECTORY), modified);
+        return kMcFsOk;
+    }
+    PutError(key + L": not in the archive", error, errorSize);
+    return kMcFsNotFound;
+}
 
-    wchar_t dir[1024] = {};
-    g_host->GetPanelPath(other, dir, 1024);
-    std::vector<PackEntry> add;
-    for (const auto& name : names_selected) {
-        std::wstring full = JoinPath(dir, name);
-        DWORD attrs = GetFileAttributesW(full.c_str());
-        if (attrs == INVALID_FILE_ATTRIBUTES) continue;
-        if (attrs & FILE_ATTRIBUTE_DIRECTORY) {
-            CollectRecursive(full, view.folder + name, add);
-        } else {
-            LARGE_INTEGER s{};
-            HANDLE h = CreateFileW(full.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
-            if (h != INVALID_HANDLE_VALUE) { GetFileSizeEx(h, &s); CloseHandle(h); }
-            add.push_back({full, view.folder + name, attrs, (uint64_t)s.QuadPart});
-        }
-    }
-    if (add.empty()) {
-        const wchar_t* lines[] = {L"No accessible files found in the other panel's selection."};
-        g_host->ShowMessage(L"Add to archive", lines, 1);
-        return;
-    }
+// A read sees a snapshot: the archive may change while a copy inside it runs.
+struct ZipReadStream {
+    std::vector<uint8_t> bytes;
+    size_t offset = 0;
+};
 
-    auto replacement = view.entries;
-    std::set<std::wstring> existingNames;
-    for (const auto& e : replacement) existingNames.insert(e.name);
-    int added = 0, skipped = 0;
-    for (const auto& p : add) {
-        if (existingNames.insert(p.archiveName).second) {
-            replacement.push_back({p.archiveName, ReadFileBytes(p.sourcePath), p.attributes, 0});
-            ++added;
-        } else {
-            ++skipped;
-        }
+McFsStatus __stdcall ZipOpenRead(void* context, const wchar_t* path, void** stream, wchar_t* error, int32_t errorSize) {
+    ArchiveView& view = A(context);
+    int file = FindFile(view, KeyOf(path));
+    if (file < 0) {
+        PutError(KeyOf(path) + L": not a file in the archive", error, errorSize);
+        return kMcFsNotFound;
     }
-    // IS-0014: deferred -- saved when leaving the archive, not immediately.
-    ApplyArchiveChanges(view, std::move(replacement));
-    wchar_t summary[256];
-    if (skipped > 0)
-        swprintf_s(summary, L"Added %d item(s); %d already present in the archive, skipped. Not yet saved.", added, skipped);
-    else
-        swprintf_s(summary, L"Added %d item(s) to the archive. Not yet saved.", added);
-    const wchar_t* lines[] = {summary};
-    g_host->ShowMessage(L"Add to archive", lines, 1);
+    *stream = new ZipReadStream{view.entries[static_cast<size_t>(file)].bytes, 0};
+    return kMcFsOk;
+}
+
+McFsStatus __stdcall ZipRead(void*, void* stream, void* buffer, uint32_t capacity, uint32_t* got, wchar_t*, int32_t) {
+    auto* s = static_cast<ZipReadStream*>(stream);
+    size_t n = std::min<size_t>(capacity, s->bytes.size() - s->offset);
+    if (n) memcpy(buffer, s->bytes.data() + s->offset, n);
+    s->offset += n;
+    *got = static_cast<uint32_t>(n);
+    return kMcFsOk;
+}
+
+void __stdcall ZipCloseRead(void*, void* stream) { delete static_cast<ZipReadStream*>(stream); }
+
+struct ZipWriteStream {
+    std::wstring key;
+    std::vector<uint8_t> bytes;
+    uint64_t modified = 0;
+};
+
+McFsStatus __stdcall ZipOpenWrite(void* context, const wchar_t* path, uint64_t sizeHint, uint64_t modifiedUtc,
+                                  void** stream, wchar_t* error, int32_t errorSize) {
+    ArchiveView& view = A(context);
+    std::wstring key = KeyOf(path);
+    if (key.empty() || !IsSafeArchiveEntryName(key)) {
+        PutError(L"Not a valid name inside the archive.", error, errorSize);
+        return kMcFsFailed;
+    }
+    if (FindFile(view, key) < 0 && FolderExists(view, key)) {
+        PutError(key + L": a folder with this name exists", error, errorSize);
+        return kMcFsFailed;
+    }
+    auto* w = new ZipWriteStream{key, {}, modifiedUtc};
+    if (sizeHint && sizeHint < (1ull << 31)) w->bytes.reserve(static_cast<size_t>(sizeHint));
+    *stream = w;
+    return kMcFsOk;
+}
+
+McFsStatus __stdcall ZipWrite(void*, void* stream, const void* data, uint32_t size, wchar_t*, int32_t) {
+    auto* w = static_cast<ZipWriteStream*>(stream);
+    const uint8_t* p = static_cast<const uint8_t*>(data);
+    w->bytes.insert(w->bytes.end(), p, p + size);
+    return kMcFsOk;
+}
+
+McFsStatus __stdcall ZipFinishWrite(void* context, void* stream, wchar_t*, int32_t) {
+    std::unique_ptr<ZipWriteStream> w(static_cast<ZipWriteStream*>(stream));
+    ArchiveView& view = A(context);
+    int existing = FindFile(view, w->key);
+    uint64_t modified = w->modified ? w->modified : 0;
+    if (existing >= 0) {
+        ArchiveEntry& e = view.entries[static_cast<size_t>(existing)];
+        e.bytes = std::move(w->bytes);
+        e.compressedSize = 0;
+        e.modifiedUtc = modified;
+    } else {
+        view.entries.push_back(ArchiveEntry{w->key, std::move(w->bytes), FILE_ATTRIBUTE_ARCHIVE, 0, modified});
+    }
+    view.dirty = true;  // IS-0014: saved when leaving the archive
+    return kMcFsOk;
+}
+
+void __stdcall ZipAbortWrite(void*, void* stream) { delete static_cast<ZipWriteStream*>(stream); }
+
+// IS-0012: F7 adds a real, persisted empty-directory marker entry.
+McFsStatus __stdcall ZipMakeDirectory(void* context, const wchar_t* path, wchar_t* error, int32_t errorSize) {
+    ArchiveView& view = A(context);
+    std::wstring key = KeyOf(path);
+    if (key.empty() || !IsSafeArchiveEntryName(key)) {
+        PutError(L"Not a valid name inside the archive.", error, errorSize);
+        return kMcFsFailed;
+    }
+    if (FindFile(view, key) >= 0) {
+        PutError(L"A file with that name already exists here.", error, errorSize);
+        return kMcFsFailed;
+    }
+    if (FolderExists(view, key)) {
+        PutError(L"That folder already exists.", error, errorSize);
+        return kMcFsFailed;
+    }
+    FILETIME now{};
+    GetSystemTimeAsFileTime(&now);
+    view.entries.push_back(ArchiveEntry{PrefixOf(key), {}, FILE_ATTRIBUTE_DIRECTORY, 0,
+                                        (static_cast<uint64_t>(now.dwHighDateTime) << 32) | now.dwLowDateTime});
+    view.dirty = true;
+    return kMcFsOk;
+}
+
+McFsStatus __stdcall ZipDelete(void* context, const wchar_t* path, bool isDirectory, wchar_t* error, int32_t errorSize) {
+    ArchiveView& view = A(context);
+    std::wstring key = KeyOf(path);
+    if (isDirectory) {
+        std::wstring prefix = PrefixOf(key);
+        bool hasContent = std::any_of(view.entries.begin(), view.entries.end(), [&](const ArchiveEntry& e) {
+            return StartsWithNoCase(e.name, prefix) && !SameNoCase(e.name, prefix);
+        });
+        if (hasContent) {
+            PutError(key + L": the folder is not empty", error, errorSize);
+            return kMcFsFailed;
+        }
+        int marker = FindMarker(view, key);
+        if (marker >= 0) {
+            view.entries.erase(view.entries.begin() + marker);
+            view.dirty = true;
+        }
+        return kMcFsOk;  // an implied folder vanished with its last entry
+    }
+    int file = FindFile(view, key);
+    if (file < 0) {
+        PutError(key + L": not in the archive", error, errorSize);
+        return kMcFsNotFound;
+    }
+    view.entries.erase(view.entries.begin() + file);
+    view.dirty = true;
+    return kMcFsOk;
+}
+
+McFsStatus __stdcall ZipRename(void* context, const wchar_t* from, const wchar_t* to, wchar_t* error, int32_t errorSize) {
+    ArchiveView& view = A(context);
+    std::wstring a = KeyOf(from), b = KeyOf(to);
+    if (b.empty() || !IsSafeArchiveEntryName(b)) {
+        PutError(L"Not a valid name inside the archive.", error, errorSize);
+        return kMcFsFailed;
+    }
+    bool caseOnly = SameNoCase(a, b);
+    if (!caseOnly && (FindFile(view, b) >= 0 || FolderExists(view, b))) {
+        PutError(b + L": already exists", error, errorSize);
+        return kMcFsFailed;
+    }
+    int file = FindFile(view, a);
+    if (file >= 0) {
+        view.entries[static_cast<size_t>(file)].name = b;
+    } else if (FolderExists(view, a)) {
+        std::wstring oldPrefix = PrefixOf(a), newPrefix = PrefixOf(b);
+        if (StartsWithNoCase(newPrefix, oldPrefix) && !caseOnly) {
+            PutError(L"Cannot move a folder into itself.", error, errorSize);
+            return kMcFsFailed;
+        }
+        for (auto& e : view.entries)
+            if (StartsWithNoCase(e.name, oldPrefix)) e.name = newPrefix + e.name.substr(oldPrefix.size());
+    } else {
+        PutError(a + L": not in the archive", error, errorSize);
+        return kMcFsNotFound;
+    }
+    view.dirty = true;
+    return kMcFsOk;
+}
+
+McFsStatus __stdcall ZipSetAttributes(void* context, const wchar_t* path, uint32_t attributes, wchar_t* error,
+                                      int32_t errorSize) {
+    ArchiveView& view = A(context);
+    std::wstring key = KeyOf(path);
+    constexpr uint32_t kSettable =
+        FILE_ATTRIBUTE_READONLY | FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM | FILE_ATTRIBUTE_ARCHIVE;
+    int index = FindFile(view, key);
+    if (index < 0) index = FindMarker(view, key);
+    if (index < 0) {
+        if (FolderExists(view, key)) return kMcFsOk;  // an implied folder has nowhere to keep attributes
+        PutError(key + L": not in the archive", error, errorSize);
+        return kMcFsNotFound;
+    }
+    ArchiveEntry& e = view.entries[static_cast<size_t>(index)];
+    e.attributes = (e.attributes & ~kSettable) | (attributes & kSettable);
+    view.dirty = true;
+    return kMcFsOk;
+}
+
+bool __stdcall ZipHasPendingChanges(void* context) { return A(context).dirty; }
+
+McFsStatus __stdcall ZipCommit(void* context, wchar_t* error, int32_t errorSize) {
+    ArchiveView& view = A(context);
+    if (SaveArchiveIfDirty(view)) {
+        LogInfo(L"Archive browser: saved \"" + view.path + L"\".");
+        return kMcFsOk;
+    }
+    PutError(L"Could not save the archive -- it stays open so nothing is lost.", error, errorSize);
+    return kMcFsFailed;
+}
+
+// ZIP-009 (Ctrl+R): re-read the archive from disk, picking up an outside
+// change. A failed reload leaves the open model untouched.
+McFsStatus __stdcall ZipReload(void* context, wchar_t* error, int32_t errorSize) {
+    ArchiveView& view = A(context);
+    if (view.dirty) {
+        const wchar_t* lines[] = {L"This archive has unsaved changes -- reloading discards them."};
+        McDialogOption options[] = {{L'Y', L"Reload anyway"}, {L'N', L"Cancel"}};
+        if (g_host->ShowChoice(L"Refresh", lines, 1, options, 2) != 0) return kMcFsCancelled;
+    }
+    if (!LoadArchive(view.path, view)) {
+        PutError(L"Could not reload the archive -- it may have been deleted or is no longer a valid ZIP file.", error,
+                 errorSize);
+        return kMcFsFailed;
+    }
+    view.dirty = false;
+    LogInfo(L"Archive browser: reloaded \"" + view.path + L"\" from disk.");
+    return kMcFsOk;
+}
+
+void __stdcall ZipClose(void* context) {
+    ArchiveView* view = static_cast<ArchiveView*>(context);
+    if (view->dirty) LogInfo(L"Archive browser: left \"" + view->path + L"\" without saving its changes.");
+    view->password.Clear();  // ARC-004: nothing secret outlives the open archive
+    g_archives.erase(std::remove(g_archives.begin(), g_archives.end(), view), g_archives.end());
+    delete view;
+}
+
+McFsProvider MakeArchiveTable(ArchiveView& view) {
+    McFsProvider t{};
+    t.structSize = sizeof(McFsProvider);
+    t.context = &view;
+    t.capabilities = kMcFsCapRead | kMcFsCapWrite | kMcFsCapMkdir | kMcFsCapDelete | kMcFsCapRename | kMcFsCapAttributes;
+    t.displayRoot = view.path.c_str();
+    t.kind = L"zip";
+    t.rootPath = L"/";
+    t.separator = L'/';
+    t.caseInsensitive = true;  // the names land on a Windows file system once extracted
+    t.confirmOnLeave = true;   // ZIP-007
+    t.List = &ZipList;
+    t.Stat = &ZipStat;
+    t.OpenRead = &ZipOpenRead;
+    t.Read = &ZipRead;
+    t.CloseRead = &ZipCloseRead;
+    t.OpenWrite = &ZipOpenWrite;
+    t.Write = &ZipWrite;
+    t.FinishWrite = &ZipFinishWrite;
+    t.AbortWrite = &ZipAbortWrite;
+    t.MakeDirectory = &ZipMakeDirectory;
+    t.Delete = &ZipDelete;
+    t.Rename = &ZipRename;
+    t.SetAttributes = &ZipSetAttributes;
+    t.HasPendingChanges = &ZipHasPendingChanges;
+    t.Commit = &ZipCommit;
+    t.Reload = &ZipReload;
+    t.Close = &ZipClose;
+    return t;
+}
+
+// ZIP-005: Enter on an archive file opens it in that panel.
+bool EnterArchive(McPanelSide side, const std::wstring& filePath) {
+    auto view = std::make_unique<ArchiveView>();
+    view->side = side;
+    view->path = filePath;
+    view->title = FileNameOf(filePath);
+    if (!LoadArchive(view->path, *view)) {
+        LogWarning(L"Archive browser: could not open \"" + view->path + L"\".");
+        return false;
+    }
+    ArchiveView* raw = view.release();
+    g_archives.push_back(raw);
+    McFsProvider table = MakeArchiveTable(*raw);
+    if (!g_host->OpenProvider(side, &table, L"/", raw->title.c_str())) {
+        g_archives.erase(std::remove(g_archives.begin(), g_archives.end(), raw), g_archives.end());
+        raw->password.Clear();
+        delete raw;
+        return false;
+    }
+    return true;
 }
 
 // IS-0011: "Archive info" -- uncompressed size / file count / directory
-// count / compression ratio, for either an already-open archive (the Phase
-// 3 live-browsing panel) or a .zip file merely selected in a normal panel
-// (not entered). This project's own writer (WriteZipArchive/
-// WriteArchiveEntries) never stores an explicit directory entry -- a
-// directory is only ever implied by the files nested under it (the same
-// convention ExtractZipArchive's own comment documents) -- so "number of
-// dirs" has to be inferred from every unique directory-path prefix across
-// every file entry's own name, not read off a dedicated entry type. A
-// third-party-created archive *can* carry explicit directory entries
-// (stat.m_is_directory); those are folded into the same prefix set rather
-// than double-counted separately.
+// count / compression ratio, for the archive open in the active panel or the
+// .zip files selected in an ordinary panel. Directories are counted from the
+// unique folder prefixes of every entry (and explicit markers).
 struct ArchiveStats {
     uint64_t uncompressedBytes = 0;
     uint64_t compressedBytes = 0;
@@ -1475,10 +1516,6 @@ ArchiveStats ComputeArchiveStats(const std::vector<ArchiveEntry>& entries) {
     ArchiveStats stats;
     std::set<std::wstring> dirs;
     for (const auto& e : entries) {
-        // IS-0012: LoadArchive now loads an explicit empty-directory marker
-        // entry (name ends in '/', zero bytes) as a real ArchiveEntry --
-        // count it toward dirCount (via RegisterDirectoryPrefixes below,
-        // same as any nested file's own prefix), not fileCount.
         bool isDirectoryMarker = !e.name.empty() && e.name.back() == L'/';
         if (!isDirectoryMarker) {
             ++stats.fileCount;
@@ -1491,10 +1528,8 @@ ArchiveStats ComputeArchiveStats(const std::vector<ArchiveEntry>& entries) {
     return stats;
 }
 
-// Reads `zipPath` fresh from disk (not yet opened as a live ArchiveView) and
-// accumulates its stats into `stats` (so a caller can sum several selected
-// archives together). Returns false (stats left unmodified) if the file
-// can't be read or isn't a valid archive.
+// Reads `zipPath` fresh from disk and accumulates its stats into `stats` (so
+// several selected archives can be summed). False if it can't be read.
 bool AccumulateArchiveStatsFromFile(const std::wstring& zipPath, ArchiveStats& stats) {
     std::vector<uint8_t> zipBytes = ReadFileBytes(zipPath);
     if (zipBytes.empty()) return false;
@@ -1551,10 +1586,13 @@ void ShowArchiveStatsMessage(const std::wstring& title, const ArchiveStats& stat
 
 void ShowArchiveInfo() {
     if (!g_host) return;
-    McPanelSide activeSide = g_host->GetActiveSide();
-    const ArchiveView& activeView = ViewFor(activeSide);
-    if (activeView.open) {
-        ShowArchiveStatsMessage(activeView.title, ComputeArchiveStats(activeView.entries));
+    if (const ArchiveView* open = ArchiveOnSide(g_host->GetActiveSide())) {
+        ShowArchiveStatsMessage(open->title + (open->dirty ? L" (unsaved changes)" : L""), ComputeArchiveStats(open->entries));
+        return;
+    }
+    if (g_host->IsPanelInProvider && g_host->IsPanelInProvider(g_host->GetActiveSide())) {
+        const wchar_t* lines[] = {L"Select one or more ZIP archives in a local folder, or open one, to see its info."};
+        g_host->ShowMessage(L"Archive info", lines, 1);
         return;
     }
 
@@ -1587,90 +1625,6 @@ void ShowArchiveInfo() {
     std::wstring title = (archivesRead == 1) ? FileNameOf(zipPaths[0]) : (std::to_wstring(archivesRead) + L" archives");
     ShowArchiveStatsMessage(title, combined);
 }
-void HandleArchiveKey(McPanelSide side, uint16_t key, uint32_t control) {
-    ArchiveView& view = ViewFor(side); if (!view.open) return;
-    if (key == VK_BACK) { LeaveOrUp(view); return; }
-    // IS-0011: checked before the items-empty early return below, since
-    // adding the other panel's selection is exactly what you need when the
-    // current folder (or a brand-new archive) has nothing in it yet -- every
-    // other key in this function legitimately needs an existing item to act
-    // on, but this one doesn't.
-    if (key == VK_INSERT && (control & SHIFT_PRESSED)) {
-        AddFilesFromPanel(view, side == kMcPanelLeft ? kMcPanelRight : kMcPanelLeft);
-        return;
-    }
-    // IS-0012: same reasoning -- reloading or creating the first directory
-    // in an empty archive/folder are both valid even with nothing to act on
-    // yet, so both are checked ahead of the items-empty early return too.
-    if (key == 'R' && (control & (LEFT_CTRL_PRESSED | RIGHT_CTRL_PRESSED))) { ReloadArchiveFromDisk(view); return; }
-    if (key == VK_F7) { CreateDirectoryInArchive(view); return; }
-    auto items = CurrentItems(view);
-    ClampArchiveCursor(view, (int)items.size());
-    if (items.empty()) return;
-    if (key == VK_F3) { ViewArchiveFile(view); return; }
-    // FEA-0008 (ZIP-011): Shift+F5 copies in place under a new name. Must be
-    // checked before the plain-F5 branch below, which ignores modifiers and
-    // used to extract the selection to the other panel on Shift+F5 too.
-    if (key == VK_F5 && (control & SHIFT_PRESSED)) { CopyWithinArchive(view); ClampArchiveCursor(view, (int)CurrentItems(view).size()); return; }
-    if (key == 'A' && (control & (LEFT_CTRL_PRESSED | RIGHT_CTRL_PRESSED))) { ChangeArchiveAttributes(view); return; }
-    if (key == VK_ADD && (control & (LEFT_CTRL_PRESSED | RIGHT_CTRL_PRESSED))) {
-        for (const auto& item : items) if (item.key != L"..") view.selected.insert(item.key);
-        return;
-    }
-    if (key == VK_SUBTRACT && (control & (LEFT_CTRL_PRESSED | RIGHT_CTRL_PRESSED))) { view.selected.clear(); return; }
-    if (key == VK_MULTIPLY) {
-        for (const auto& item : items) if (item.key != L"..") { if (!view.selected.erase(item.key)) view.selected.insert(item.key); }
-        return;
-    }
-    int page = view.visibleRows; if (key == VK_UP) --view.cursor; else if (key == VK_DOWN) ++view.cursor; else if (key == VK_PRIOR) view.cursor -= page; else if (key == VK_NEXT) view.cursor += page; else if (key == VK_HOME) view.cursor = 0; else if (key == VK_END) view.cursor = (int)items.size()-1;
-    else if (key == VK_INSERT) { if (items[view.cursor].key != L"..") { if (!view.selected.erase(items[view.cursor].key)) view.selected.insert(items[view.cursor].key); if (view.cursor + 1 < (int)items.size()) ++view.cursor; } }
-    else if (key == VK_RETURN) { const auto& item=items[view.cursor]; if(item.key==L"..") LeaveOrUp(view); else if(item.directory){view.folder=item.key;view.cursor=0;} }
-    else if (key == VK_BACK) LeaveOrUp(view); else if (key == VK_F8 || key == VK_DELETE) DeleteFromArchive(view); else if (key == VK_F5) ExtractOrMove(view,false); else if (key == VK_F6) ExtractOrMove(view,true);
-    ClampArchiveCursor(view, (int)CurrentItems(view).size());
-}
-void HandleArchiveClick(McPanelSide side, int16_t x, int16_t y, bool doubleClick);
-void HandleArchiveMouse(McPanelSide side, int16_t x, int16_t y, uint32_t buttons, uint32_t flags, uint32_t control) {
-    auto& view = ViewFor(side);
-    if (!view.open) return;
-    if (flags == MOUSE_WHEELED) {
-        int delta = static_cast<short>(HIWORD(buttons)) > 0 ? -3 : 3;
-        view.cursor += delta; ClampArchiveCursor(view, (int)CurrentItems(view).size()); return;
-    }
-    if (!(buttons & RIGHTMOST_BUTTON_PRESSED)) view.mouseSelecting = false;
-    auto items = CurrentItems(view);
-    int index = view.topIndex + y - 1;
-    if (y < 1 || y > view.visibleRows || index < 0 || index >= (int)items.size()) return;
-    bool range = (control & (SHIFT_PRESSED | LEFT_CTRL_PRESSED | RIGHT_CTRL_PRESSED)) != 0;
-    if ((buttons & (RIGHTMOST_BUTTON_PRESSED | FROM_LEFT_1ST_BUTTON_PRESSED)) && range && flags == 0) {
-        for (int i = std::min(view.cursor, index); i <= std::max(view.cursor, index); ++i)
-            if (items[i].key != L"..") view.selected.insert(items[i].key);
-        view.cursor = index; return;
-    }
-    if (buttons & RIGHTMOST_BUTTON_PRESSED) {
-        if (!view.mouseSelecting && flags != 0) return;
-        if (!view.mouseSelecting) {
-            view.mouseSelectValue = !view.selected.count(items[index].key);
-            view.mouseSelecting = true;
-        }
-        if (items[index].key != L"..") {
-            if (view.mouseSelectValue) view.selected.insert(items[index].key);
-            else view.selected.erase(items[index].key);
-        }
-        view.cursor = index; return;
-    }
-    if ((buttons & FROM_LEFT_1ST_BUTTON_PRESSED) && (flags == 0 || flags == DOUBLE_CLICK))
-        HandleArchiveClick(side, x, y, flags == DOUBLE_CLICK);
-}
-void HandleArchiveClick(McPanelSide side, int16_t, int16_t y, bool doubleClick) {
-    ArchiveView& view = ViewFor(side);
-    if (!view.open || y < 1 || y > view.visibleRows) return;
-    int index = view.topIndex + y - 1;
-    auto items = CurrentItems(view);
-    if (index >= 0 && index < (int)items.size()) {
-        view.cursor = index;
-        if (doubleClick) HandleArchiveKey(side, VK_RETURN, 0);
-    }
-}
 
 }  // namespace
 
@@ -1678,14 +1632,14 @@ extern "C" __declspec(dllexport) const McPluginMetadata* __stdcall McPlugin_GetI
     static const McPluginMetadata info = {
         sizeof(McPluginMetadata),
         MC_PLUGIN_API_VERSION_MAJOR,
-        MC_PLUGIN_API_VERSION_MINOR,
+        MC_PLUGIN_API_VERSION_MINOR,  // 1.12: file-system providers (EXT-002)
         MC_PLUGIN_MAGIC,
         L"com.mycommander.zipplugin",
         L"ZIP Plugin",
         L"ZIP archive support: packing, unpacking, and live archive browsing.",
         MCPLUGIN_VERSION_WSTR,  // IS-0011: one source of truth, also feeds ZipPlugin.rc's file-version resource
         L"MyCommander project",
-        kMcPluginCapMenu | kMcPluginCapPanel | kMcPluginCapArchiveHandler | kMcPluginCapHelp,
+        kMcPluginCapMenu | kMcPluginCapFileSystem | kMcPluginCapArchiveHandler | kMcPluginCapHelp,
     };
     return &info;
 }
@@ -1711,36 +1665,31 @@ extern "C" __declspec(dllexport) bool __stdcall McPlugin_Init(const McPluginHost
 }
 
 extern "C" __declspec(dllexport) void __stdcall McPlugin_Shutdown(void) {
-    // IS-0014: deferred edits are only ever written when leaving an archive
-    // (LeaveOrUp) -- if the whole app quits with one still open and dirty,
-    // auto-save it here as a safety net rather than silently losing the
-    // in-memory changes. Best-effort, no prompt: a dialog during teardown is
-    // riskier than it's worth, and g_host is still valid at this point.
-    for (const auto& view : g_views) {
-        if (view.open && view.dirty) {
-            if (WriteArchiveEntries(view.path, view.entries))
-                LogInfo(L"Archive browser: auto-saved \"" + view.path + L"\" on shutdown.");
-            else
-                LogError(L"Archive browser: could not auto-save \"" + view.path + L"\" on shutdown -- unsaved changes may be lost.");
-        }
+    // The host closes every open archive (asking about unsaved changes when
+    // the user quits) before a plugin shuts down; this only covers a host
+    // that didn't (a harness). Nothing is saved here unasked.
+    for (ArchiveView* view : g_archives) {
+        view->password.Clear();  // ARC-004: nothing secret outlives the plugin
+        delete view;
     }
+    g_archives.clear();
     g_host = nullptr;
 }
+
 extern "C" __declspec(dllexport) const wchar_t* __stdcall McPlugin_GetHelpMarkdown(void) {
-    return L"# ZIP panel\n- Enter on a .zip, .jar, .war, .ear, .apk, .xpi, .vsix, .nupkg or .whl file: browse it\n"
-           L"- F3: view the current file\n- F5/F6: extract/copy or move selected files to the other panel\n"
-           L"- Shift+F5: copy the current item under a new name (or relative path) inside the archive\n"
-           L"- F7: create a directory\n- F8 / Delete: delete selected archive entries\n"
-           L"- Ctrl+A: toggle archive file attributes\n- Ctrl+R: reload the archive from disk\n"
-           L"- Insert: toggle selection\n- Shift+Insert: add the other panel's selection into the archive\n"
-           L"- Right-click/right-drag: select files\n"
-           L"- Ctrl-click or Shift-click: select a range (Ctrl works in legacy console hosts)\n"
-           L"- Backspace: parent folder or confirm leaving the archive\n"
-           L"- F5 pressed from the *other* panel (with this archive open) also copies its selection "
-           L"into this archive, same as Shift+Insert\n"
-           L"- Changes are batched in memory and only written to disk when you leave the archive "
-           L"(prompting to save/discard if anything is pending) -- a `*` after \"Name\" in the header "
-           L"means there are unsaved changes\n";
+    return L"# ZIP archives\n- Enter on a .zip, .jar, .war, .ear, .apk, .xpi, .vsix, .nupkg or .whl file: browse it in the panel\n"
+           L"- Inside an archive every panel feature works as on a folder: sorting (Ctrl+F3..F6), the quick filter\n"
+           L"  (Ctrl+F), Brief view, selection, F3 view\n"
+           L"- F5 / F6: copy / move to the other panel -- a folder, another archive or a server; F5 / F6 in the\n"
+           L"  other panel copies / moves into the archive\n"
+           L"- Shift+F5: copy the current item under a new name or a relative path inside the archive\n"
+           L"- F7: create a folder; Shift+F7: new empty file; F2: rename; F8: delete; Ctrl+A: toggle attributes\n"
+           L"- Ctrl+R: reload the archive from disk\n"
+           L"- `..` at the archive's top folder leaves it, asking first; File > Archive info: sizes and counts\n"
+           L"- Changes are kept in memory and written to the file only when you leave the archive (or quit),\n"
+           L"  after a Save / Don't save / Cancel prompt\n"
+           L"- Password-protected archives (WinZip AES, ZipCrypto) ask for the password once, in a masked "
+           L"field; Pack file can encrypt with AES-256. An archive that was encrypted is saved encrypted\n";
 }
 
 extern "C" __declspec(dllexport) void __stdcall McPlugin_OnMenuAction(uint32_t commandId) {
@@ -1755,37 +1704,5 @@ extern "C" __declspec(dllexport) bool __stdcall McPlugin_CanHandleFile(const wch
 
 extern "C" __declspec(dllexport) bool __stdcall McPlugin_EnterArchive(McPanelSide side, const wchar_t* filePath) {
     if (!g_host || !filePath) return false;
-    ArchiveView candidate; candidate.open = true; candidate.side = side; candidate.path = filePath; candidate.title = FileNameOf(filePath);
-    if (!LoadArchive(candidate.path, candidate)) { LogWarning(L"Archive browser: could not open \"" + candidate.path + L"\"."); return false; }
-    if (!g_host->RequestPanelContent(side, candidate.title.c_str())) return false;
-    ViewFor(side) = std::move(candidate);
-    return true;
-}
-
-// IS-0011 follow-up: lets the host's own F5 Copy, pressed while the other
-// (real) panel is active and this archive is open on `side`, add the
-// selection into the archive instead of the host falling back to copying
-// onto the archive's real containing directory (reported bug -- "Copy to
-// zip not working," since a panel showing plugin content still reports its
-// own real filesystem path underneath, which is what the host's ordinary
-// copy targets when nothing intercepts it).
-extern "C" __declspec(dllexport) bool __stdcall McPlugin_OnReceiveFiles(McPanelSide side, McPanelSide sourceSide) {
-    ArchiveView& view = ViewFor(side);
-    if (!view.open) return false;
-    AddFilesFromPanel(view, sourceSide);
-    return true;
-}
-
-extern "C" __declspec(dllexport) void __stdcall McPlugin_OnPanelDraw(McPanelSide side, uint16_t width, uint16_t height, bool active) {
-    DrawArchive(side, width, height, active);
-}
-extern "C" __declspec(dllexport) void __stdcall McPlugin_OnPanelKey(McPanelSide side, uint16_t key, uint32_t control) {
-    HandleArchiveKey(side, key, control);
-}
-extern "C" __declspec(dllexport) void __stdcall McPlugin_OnPanelClick(McPanelSide side, int16_t x, int16_t y, bool doubleClick) {
-    HandleArchiveClick(side, x, y, doubleClick);
-}
-extern "C" __declspec(dllexport) void __stdcall McPlugin_OnPanelMouse(McPanelSide side, int16_t x, int16_t y,
-                                                                     uint32_t buttons, uint32_t flags, uint32_t control) {
-    HandleArchiveMouse(side, x, y, buttons, flags, control);
+    return EnterArchive(side, filePath);
 }

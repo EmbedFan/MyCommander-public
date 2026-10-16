@@ -218,7 +218,8 @@ private:
                 SendText(c, files_.count(renameFrom) ? "350 Ready\r\n" : "550 No such file\r\n");
             } else if (verb == "RNTO") {
                 auto node = files_.extract(renameFrom);
-                if (node) { node.key() = Join(cwd, arg); files_.insert(std::move(node)); SendText(c, "250 Renamed\r\n"); }
+                // Like most servers, RNTO onto an existing file replaces it.
+                if (node) { files_[Join(cwd, arg)] = std::move(node.mapped()); SendText(c, "250 Renamed\r\n"); }
                 else SendText(c, "503 RNFR first\r\n");
             } else if (verb == "ABOR") SendText(c, "226 Aborted\r\n");
             else if (verb == "QUIT") { SendText(c, "221 Bye\r\n"); return; }

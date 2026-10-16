@@ -194,3 +194,12 @@ TEST_CASE(BuiltinShortcutInventory_DoesNotClaimAnObviouslyFreeCombination) {
     const auto& inventory = BuiltinShortcutInventory();
     CHECK(!ConflictsWithBuiltinShortcut(PluginShortcutKey{static_cast<WORD>(L'Q'), true, true, true}, inventory));
 }
+
+// --- CanNavigatePanel (API 1.13, FEA-0010) ------------------------------------
+
+TEST_CASE(CanNavigatePanel_OnlyAPlainFilePanelMayBeNavigated_FEA0010) {
+    CHECK(mc::CanNavigatePanel(false, false));
+    CHECK(!mc::CanNavigatePanel(true, false));   // plugin content installed
+    CHECK(!mc::CanNavigatePanel(false, true));   // an archive / server provider is shown
+    CHECK(!mc::CanNavigatePanel(true, true));
+}

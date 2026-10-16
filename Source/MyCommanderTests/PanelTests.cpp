@@ -1241,3 +1241,219 @@ TEST_CASE(Panel_SelectionOrCursor_EmptyWhenCursorIsOnParentAndNothingSelected_SE
 
     CHECK(names.empty());
 }
+
+// --- LIST-007: RefreshPreservingState ----------------------------------------
+
+namespace {
+int IndexOf(const Panel& panel, const std::wstring& name) {
+    const auto& entries = panel.Entries();
+    for (size_t i = 0; i < entries.size(); ++i) {
+        if (entries[i].name == name) return static_cast<int>(i);
+    }
+    return -1;
+}
+}  // namespace
+
+TEST_CASE(Panel_RefreshPreservingState_KeepsSelectionAndCursor_LIST007) {
+    test::TempDir root;
+    for (const char* n : {"a.txt", "b.txt", "c.txt", "d.txt"}) test::WriteFileContent(root.Path() / n, "x");
+    Panel panel(root.Path());
+    panel.SetEntrySelected(IndexOf(panel, L"b.txt"), true);
+    panel.SetEntrySelected(IndexOf(panel, L"d.txt"), true);
+    panel.MoveCursor(IndexOf(panel, L"c.txt") - panel.Cursor(), 20);
+
+    test::WriteFileContent(root.Path() / L"e.txt", "new");  // an external change
+    panel.RefreshPreservingState();
+
+    CHECK(FindEntry(panel, L"e.txt") != nullptr);
+    CHECK(FindEntry(panel, L"b.txt")->selected);
+    CHECK(FindEntry(panel, L"d.txt")->selected);
+    CHECK(!FindEntry(panel, L"a.txt")->selected);
+    CHECK(panel.Entries()[panel.Cursor()].name == L"c.txt");
+    CHECK(panel.SelectedCount() == 2);
+}
+
+TEST_CASE(Panel_RefreshPreservingState_DropsVanishedSelectionAndMovesCursor_LIST007) {
+    test::TempDir root;
+    for (const char* n : {"a.txt", "b.txt", "c.txt"}) test::WriteFileContent(root.Path() / n, "x");
+    Panel panel(root.Path());
+    panel.SetEntrySelected(IndexOf(panel, L"b.txt"), true);
+    panel.MoveCursor(IndexOf(panel, L"b.txt") - panel.Cursor(), 20);
+    const int cursorBefore = panel.Cursor();
+
+    std::error_code ec;
+    fs::remove(root.Path() / L"b.txt", ec);
+    panel.RefreshPreservingState();
+
+    CHECK(FindEntry(panel, L"b.txt") == nullptr);
+    CHECK(panel.SelectedCount() == 0);
+    CHECK(panel.Cursor() == cursorBefore);  // the nearest index: now on c.txt
+    CHECK(panel.Entries()[panel.Cursor()].name == L"c.txt");
+}
+
+TEST_CASE(Panel_RefreshPreservingState_KeepsFilterSortAndCountsListing_LIST007) {
+    test::TempDir root;
+    test::WriteFileContent(root.Path() / L"one.txt", "1");
+    test::WriteFileContent(root.Path() / L"two.log", "22");
+    test::WriteFileContent(root.Path() / L"three.txt", "333");
+    Panel panel(root.Path());
+    panel.SetFilter(L"*.txt");
+    panel.SetSort(SortKey::Size, true);
+    const uint64_t startsBefore = panel.RefreshStarts();
+
+    panel.RefreshPreservingState();
+
+    CHECK(panel.RefreshStarts() == startsBefore + 1);
+    CHECK(panel.Filter() == L"*.txt");
+    CHECK(panel.Sort() == SortKey::Size && panel.SortDescending());
+    CHECK(FindEntry(panel, L"two.log") == nullptr);
+    CHECK(NamesExcludingParent(panel) == (std::vector<std::wstring>{L"three.txt", L"one.txt"}));
+}
+
+TEST_CASE(Panel_PlainRefresh_StillClearsSelection_LIST007) {
+    test::TempDir root;
+    test::WriteFileContent(root.Path() / L"a.txt", "x");
+    Panel panel(root.Path());
+    panel.SetEntrySelected(IndexOf(panel, L"a.txt"), true);
+    panel.Refresh();
+    CHECK(panel.SelectedCount() == 0);  // explicit refresh behaviour is unchanged
+}
+
+// --- NAV-016: SwapListingWith ----------------------------------------------------
+
+TEST_CASE(Panel_SwapListing_ExchangesFolderEntriesSelectionAndCursor_NAV016) {
+    test::TempDir a;
+    test::TempDir b;
+    test::WriteFileContent(a.Path() / L"alpha.txt", "1");
+    test::WriteFileContent(a.Path() / L"alpha2.txt", "1");
+    test::WriteFileContent(b.Path() / L"beta.txt", "22");
+    Panel left(a.Path());
+    Panel right(b.Path());
+    left.SetEntrySelected(IndexOf(left, L"alpha.txt"), true);
+    left.MoveCursor(IndexOf(left, L"alpha2.txt") - left.Cursor(), 20);
+
+    CHECK(left.SwapListingWith(right));
+
+    CHECK(left.Path() == b.Path());
+    CHECK(right.Path() == a.Path());
+    CHECK(FindEntry(left, L"beta.txt") != nullptr && FindEntry(left, L"alpha.txt") == nullptr);
+    CHECK(FindEntry(right, L"alpha.txt") != nullptr && FindEntry(right, L"beta.txt") == nullptr);
+    CHECK(FindEntry(right, L"alpha.txt")->selected);                       // the selection travelled
+    CHECK(right.Entries()[right.Cursor()].name == L"alpha2.txt");          // and so did the cursor
+    CHECK(left.SelectedCount() == 0 && right.SelectedCount() == 1);
+}
+
+TEST_CASE(Panel_SwapListing_CarriesSortFilterAndPreferences_NAV016) {
+    test::TempDir a;
+    test::TempDir b;
+    test::WriteFileContent(a.Path() / L"one.txt", "1");
+    test::WriteFileContent(a.Path() / L"two.log", "22");
+    test::WriteFileContent(a.Path() / L"three.txt", "333");
+    Panel left(a.Path());
+    Panel right(b.Path());
+    left.SetFilter(L"*.txt");
+    left.SetSort(SortKey::Size, true);
+    left.SetBriefView(true);
+    left.ToggleHiddenAndSystem();
+
+    CHECK(left.SwapListingWith(right));
+
+    CHECK(right.Filter() == L"*.txt");
+    CHECK(right.Sort() == SortKey::Size && right.SortDescending());
+    CHECK(right.BriefView());
+    CHECK(right.ShowingHiddenAndSystem());
+    CHECK(left.Filter().empty() && left.Sort() == SortKey::Name && !left.BriefView() && !left.ShowingHiddenAndSystem());
+    CHECK(NamesExcludingParent(right) == (std::vector<std::wstring>{L"three.txt", L"one.txt"}));
+}
+
+TEST_CASE(Panel_SwapListing_CarriesBackHistory_NAV016) {
+    test::TempDir a;
+    test::TempDir b;
+    fs::create_directory(a.Path() / L"sub");
+    Panel left(a.Path());
+    Panel right(b.Path());
+    left.NavigateTo(a.Path() / L"sub");
+    CHECK(left.CanNavigateBack() && !right.CanNavigateBack());
+
+    CHECK(left.SwapListingWith(right));
+
+    CHECK(!left.CanNavigateBack() && right.CanNavigateBack());
+    CHECK(right.Path() == a.Path() / L"sub");
+    CHECK(right.NavigateBack());  // back from the swapped panel goes to its own previous folder
+    CHECK(right.Path() == a.Path());
+}
+
+TEST_CASE(Panel_SwapListing_TwiceRestoresAndSelfSwapIsANoOp_NAV016) {
+    test::TempDir a;
+    test::TempDir b;
+    test::WriteFileContent(a.Path() / L"x.txt", "1");
+    Panel left(a.Path());
+    Panel right(b.Path());
+    left.SetEntrySelected(IndexOf(left, L"x.txt"), true);
+
+    CHECK(left.SwapListingWith(right));
+    CHECK(left.SwapListingWith(right));
+    CHECK(left.Path() == a.Path() && right.Path() == b.Path());
+    CHECK(left.SelectedCount() == 1);
+
+    CHECK(left.SwapListingWith(left));  // swapping with itself changes nothing
+    CHECK(left.Path() == a.Path() && left.SelectedCount() == 1);
+}
+
+TEST_CASE(Panel_SwapListing_RefusedWhileContentIsInstalled_NAV016) {
+    struct NullContent : mc::IPanelContent {
+        void Draw(mc::Console&, SHORT, SHORT, SHORT, SHORT, bool) override {}
+        void OnKey(WORD, DWORD, wchar_t) override {}
+        void OnMouseClick(SHORT, SHORT, bool) override {}
+    };
+    test::TempDir a;
+    test::TempDir b;
+    Panel left(a.Path());
+    Panel right(b.Path());
+    NullContent content;
+    left.SetContent(&content, L"plugin");
+
+    CHECK(!left.SwapListingWith(right));
+    CHECK(!right.SwapListingWith(left));
+    CHECK(left.Path() == a.Path() && right.Path() == b.Path());  // nothing changed
+
+    left.SetContent(nullptr);
+    CHECK(left.SwapListingWith(right));
+}
+
+TEST_CASE(Panel_SetSort_ByAttributes_GroupsReadOnlyHiddenArchivePlainThenName_LIST011) {
+    test::TempDir root;
+    const auto make = [&](const wchar_t* name, DWORD attrs) {
+        test::WriteFileContent(root.Path() / name, "x");
+        SetFileAttributesW((root.Path() / name).c_str(), attrs);
+    };
+    make(L"plain-b.txt", FILE_ATTRIBUTE_NORMAL);
+    make(L"arch-a.txt", FILE_ATTRIBUTE_ARCHIVE);
+    make(L"ro-z.txt", FILE_ATTRIBUTE_READONLY | FILE_ATTRIBUTE_ARCHIVE);  // read-only wins over archive
+    make(L"hid-m.txt", FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_ARCHIVE);
+    make(L"ro-a.txt", FILE_ATTRIBUTE_READONLY);
+    std::filesystem::create_directories(root.Path() / L"folder");
+
+    Panel panel(root.Path());
+    panel.ToggleHiddenAndSystem();  // show the hidden one
+    panel.SetSort(SortKey::Attributes, /*descending=*/false);
+    CHECK(panel.Sort() == SortKey::Attributes);
+
+    auto names = NamesExcludingParent(panel);
+    CHECK(names.size() == 6);
+    if (names.size() == 6) {
+        CHECK(names[0] == L"folder");  // directories stay grouped first
+        CHECK(names[1] == L"ro-a.txt");
+        CHECK(names[2] == L"ro-z.txt");
+        CHECK(names[3] == L"hid-m.txt");
+        CHECK(names[4] == L"arch-a.txt");
+        CHECK(names[5] == L"plain-b.txt");
+    }
+    panel.SetSort(SortKey::Attributes, /*descending=*/true);
+    names = NamesExcludingParent(panel);
+    if (names.size() == 6) {
+        CHECK(names[0] == L"folder");
+        CHECK(names[1] == L"plain-b.txt");
+        CHECK(names[5] == L"ro-a.txt");
+    }
+}

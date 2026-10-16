@@ -13,7 +13,9 @@ namespace mc {
 // before any worker exists (TST-005 precedent). Thread handoff is Phase 2.
 
 enum class JobKind { Copy, Move, Delete };
-enum class JobState { Queued, Running, WaitingForAnswer, Done, Cancelled, Failed };
+// FOP-015: Paused is a Running job the user paused (P in the job list). It stays
+// active: it keeps its volume and its paths, so nothing else starts on them.
+enum class JobState { Queued, Running, WaitingForAnswer, Done, Cancelled, Failed, Paused };
 
 struct Job {
     uint64_t id = 0;
@@ -68,7 +70,7 @@ public:
     // Unrelated jobs behind it still start: no head-of-line blocking.
     std::optional<Job> NextToRun();
 
-    // The first active (Running / WaitingForAnswer) job touching any of
+    // The first active (Running / WaitingForAnswer / Paused) job touching any of
     // `paths` (PathsOverlapLexically against JobPaths), or nothing. Used to
     // refuse a synchronous operation on files a background job is using.
     std::optional<Job> ActiveJobTouching(const std::vector<std::filesystem::path>& paths) const;
@@ -87,7 +89,7 @@ public:
     void Finish(uint64_t id, JobState finalState);
 
     const std::vector<Job>& Jobs() const { return jobs_; }
-    size_t ActiveCount() const;  // Running + WaitingForAnswer
+    size_t ActiveCount() const;  // Running + WaitingForAnswer + Paused
     size_t QueuedCount() const;
 
 private:

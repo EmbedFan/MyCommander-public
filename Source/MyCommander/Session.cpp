@@ -56,6 +56,12 @@ SessionState LoadSessionFrom(const std::filesystem::path& path) {
             if (flag == L"yes" || flag == L"true" || flag == L"1") state.singlePanel = true;
             else if (flag == L"no" || flag == L"false" || flag == L"0") state.singlePanel = false;
         }
+        if (key == L"leftbrief" || key == L"rightbrief") {  // UI-017: anything but yes/no is ignored (Full view)
+            const std::wstring flag = ToLower(value);
+            bool* target = key == L"leftbrief" ? &state.leftBrief : &state.rightBrief;
+            if (flag == L"yes" || flag == L"true" || flag == L"1") *target = true;
+            else if (flag == L"no" || flag == L"false" || flag == L"0") *target = false;
+        }
     }
     return state;
 }
@@ -76,7 +82,9 @@ bool SaveSessionTo(const std::filesystem::path& path, const SessionState& state)
         output << L"# MyCommander clean-exit panel locations (NAV-008)\n"
                << L"leftPath = " << state.leftPath->wstring() << L"\n"
                << L"rightPath = " << state.rightPath->wstring() << L"\n"
-               << L"singlePanel = " << (state.singlePanel ? L"yes" : L"no") << L"\n";
+               << L"singlePanel = " << (state.singlePanel ? L"yes" : L"no") << L"\n"
+               << L"leftBrief = " << (state.leftBrief ? L"yes" : L"no") << L"\n"
+               << L"rightBrief = " << (state.rightBrief ? L"yes" : L"no") << L"\n";
         if (!output) return false;
     }
 

@@ -74,6 +74,37 @@ TEST_CASE(BuildElevatedHelperParameters_ToggleAttribute_EncodesTheFlagByName_SEC
     CHECK(params.find(L"hidden") != std::wstring::npos);
 }
 
+TEST_CASE(BuildElevatedHelperParameters_SetVolumeLabel_EncodesRootAndLabel_SEC003_NAV013) {
+    ElevatedRequest req{ElevatedAction::SetVolumeLabel, L"C:\\"};
+    req.text = L"MyDrive";
+    std::wstring params = BuildElevatedHelperParameters(req);
+
+    CHECK(params.find(L"--elevated-label") != std::wstring::npos);
+    CHECK(params.find(L"MyDrive") != std::wstring::npos);
+}
+
+TEST_CASE(BuildElevatedHelperParameters_ShareFolder_EncodesNameDescriptionAndReadOnly_SEC003_NAV015) {
+    ElevatedRequest req{ElevatedAction::ShareFolder, L"C:\\shared"};
+    req.text = L"MyShare";
+    req.description = L"A test share";
+    req.readOnly = true;
+    std::wstring params = BuildElevatedHelperParameters(req);
+
+    CHECK(params.find(L"--elevated-share") != std::wstring::npos);
+    CHECK(params.find(L"MyShare") != std::wstring::npos);
+    CHECK(params.find(L"A test share") != std::wstring::npos);
+    CHECK(params.find(L"--readonly") != std::wstring::npos);
+}
+
+TEST_CASE(BuildElevatedHelperParameters_UnshareFolder_EncodesTheShareName_SEC003_NAV015) {
+    ElevatedRequest req{ElevatedAction::UnshareFolder, {}};
+    req.text = L"MyShare";
+    std::wstring params = BuildElevatedHelperParameters(req);
+
+    CHECK(params.find(L"--elevated-unshare") != std::wstring::npos);
+    CHECK(params.find(L"MyShare") != std::wstring::npos);
+}
+
 // --- RunAsElevatedHelperIfRequested (argv dispatch) -------------------------
 
 TEST_CASE(RunAsElevatedHelperIfRequested_NoArguments_ReturnsNullopt) {
@@ -168,6 +199,53 @@ TEST_CASE(RunAsElevatedHelperIfRequested_ToggleAttribute_UnrecognizedNameFails) 
 
     CHECK(result.has_value());
     if (result) CHECK(*result == static_cast<DWORD>(ERROR_INVALID_PARAMETER));
+}
+
+TEST_CASE(RunAsElevatedHelperIfRequested_SetVolumeLabel_TooFewArgumentsFails_NAV013) {
+    auto result = RunHelper({L"MyCommander.exe", L"--elevated-label", L"C:\\"});
+    CHECK(result.has_value());
+    if (result) CHECK(*result == static_cast<DWORD>(ERROR_INVALID_PARAMETER));
+}
+
+TEST_CASE(RunAsElevatedHelperIfRequested_SetVolumeLabel_NonRootPathFailsSafely_SEC003_NAV013) {
+    // Never touches a real volume's label: an ordinary folder is not a
+    // volume root, so SetVolumeLabelW itself refuses it with a real Win32
+    // error, rather than this test needing (or risking) actual drive state.
+    test::TempDir root;
+    auto result = RunHelper({L"MyCommander.exe", L"--elevated-label", root.Path().wstring(), L"NewLabel"});
+    CHECK(result.has_value());
+    if (result) CHECK(*result != ERROR_SUCCESS);
+}
+
+TEST_CASE(RunAsElevatedHelperIfRequested_ShareFolder_TooFewArgumentsFails_NAV015) {
+    auto result = RunHelper({L"MyCommander.exe", L"--elevated-share", L"C:\\shared", L"MyShare"});
+    CHECK(result.has_value());
+    if (result) CHECK(*result == static_cast<DWORD>(ERROR_INVALID_PARAMETER));
+}
+
+TEST_CASE(RunAsElevatedHelperIfRequested_ShareFolder_WithoutAdminRightsFailsSafely_SEC003_NAV015) {
+    // Never actually creates a share: this test process isn't elevated, so
+    // NetShareAdd refuses with a real Win32 error (typically access denied)
+    // before touching anything -- the same "assert on the expected failure
+    // mode, never force the real side effect" precedent as SetVolumeLabel's
+    // own non-root-path test above.
+    test::TempDir root;
+    auto result = RunHelper(
+        {L"MyCommander.exe", L"--elevated-share", root.Path().wstring(), L"MyCommanderTestShare", L""});
+    CHECK(result.has_value());
+    if (result) CHECK(*result != ERROR_SUCCESS);
+}
+
+TEST_CASE(RunAsElevatedHelperIfRequested_UnshareFolder_TooFewArgumentsFails_NAV015) {
+    auto result = RunHelper({L"MyCommander.exe", L"--elevated-unshare"});
+    CHECK(result.has_value());
+    if (result) CHECK(*result == static_cast<DWORD>(ERROR_INVALID_PARAMETER));
+}
+
+TEST_CASE(RunAsElevatedHelperIfRequested_UnshareFolder_NonexistentShareFailsSafely_SEC003_NAV015) {
+    auto result = RunHelper({L"MyCommander.exe", L"--elevated-unshare", L"MyCommanderTestShareThatDoesNotExist"});
+    CHECK(result.has_value());
+    if (result) CHECK(*result != ERROR_SUCCESS);
 }
 
 TEST_CASE(RunAsElevatedHelperIfRequested_NonexistentSource_ReportsThePreciseWin32Error_SEC003) {

@@ -51,6 +51,7 @@
   </PropertyGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <ClCompile>
+      <MultiProcessorCompilation>true</MultiProcessorCompilation>
       <WarningLevel>Level4</WarningLevel>
       <SDLCheck>true</SDLCheck>
       <PreprocessorDefinitions>_DEBUG;_CONSOLE;UNICODE;_UNICODE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
@@ -66,6 +67,7 @@
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <ClCompile>
+      <MultiProcessorCompilation>true</MultiProcessorCompilation>
       <WarningLevel>Level4</WarningLevel>
       <FunctionLevelLinking>true</FunctionLevelLinking>
       <IntrinsicFunctions>true</IntrinsicFunctions>
@@ -94,6 +96,26 @@
     <ClCompile Include="ElevationTests.cpp" />
     <ClCompile Include="HintBarTests.cpp" />
     <ClCompile Include="HexDumpTests.cpp" />
+    <ClCompile Include="ClipboardTests.cpp" />
+    <ClCompile Include="DiskUsageTests.cpp" />
+    <ClCompile Include="ExplorerRevealTests.cpp" />
+    <ClCompile Include="PathCompletionTests.cpp" />
+    <ClCompile Include="ShortcutTests.cpp" />
+    <ClCompile Include="HistorySearchTests.cpp" />
+    <ClCompile Include="ListingExportTests.cpp" />
+    <ClCompile Include="FolderSizeTests.cpp" />
+    <ClCompile Include="ClipboardPasteTests.cpp" />
+    <ClCompile Include="SecureDeleteTests.cpp" />
+    <ClCompile Include="RecycleBinTests.cpp" />
+    <ClCompile Include="UndoJournalTests.cpp" />
+    <ClCompile Include="ProviderCompareTests.cpp" />
+    <ClCompile Include="PluginProviderAdapterTests.cpp" />
+    <ClCompile Include="PanelProviderTests.cpp" />
+    <ClCompile Include="ProviderCopyTests.cpp" />
+    <ClCompile Include="LocalProviderTests.cpp" />
+    <ClCompile Include="CheckSumTests.cpp" />
+    <ClCompile Include="NetDrivesTests.cpp" />
+    <ClCompile Include="NetSharesTests.cpp" />
     <ClCompile Include="DirectoryTreeTests.cpp" />
     <ClCompile Include="OperationQueueTests.cpp" />
     <ClCompile Include="JobWorkerTests.cpp" />
@@ -104,6 +126,14 @@
     <ClCompile Include="ContentSearchTests.cpp" />
     <ClCompile Include="DirCompareTests.cpp" />
     <ClCompile Include="DirSyncTests.cpp" />
+    <ClCompile Include="FolderWatchTests.cpp" />
+    <ClCompile Include="PauseTokenTests.cpp" />
+    <ClCompile Include="RecentLocationsTests.cpp" />
+    <ClCompile Include="EmptyFoldersTests.cpp" />
+    <ClCompile Include="LabelsTests.cpp" />
+    <ClCompile Include="IconAssetTests.cpp" />
+    <ClCompile Include="NetInfoModelTests.cpp" />
+    <ClCompile Include="NetInfoControllerTests.cpp" />
     <ClCompile Include="TextDiffTests.cpp" />
     <ClCompile Include="KeyMapTests.cpp" />
     <ClCompile Include="FileActionsTests.cpp" />
@@ -161,6 +191,21 @@
     <ClCompile Include="..\MyCommander\DirSync.cpp">
       <ObjectFileName>$(IntDir)MyCommander_DirSync.obj</ObjectFileName>
     </ClCompile>
+    <ClCompile Include="..\MyCommander\Labels.cpp">
+      <ObjectFileName>$(IntDir)MyCommander_Labels.obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="..\MyCommander\EmptyFolders.cpp">
+      <ObjectFileName>$(IntDir)MyCommander_EmptyFolders.obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="..\MyCommander\RecentLocations.cpp">
+      <ObjectFileName>$(IntDir)MyCommander_RecentLocations.obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="..\MyCommander\PauseToken.cpp">
+      <ObjectFileName>$(IntDir)MyCommander_PauseToken.obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="..\MyCommander\FolderWatch.cpp">
+      <ObjectFileName>$(IntDir)MyCommander_FolderWatch.obj</ObjectFileName>
+    </ClCompile>
     <ClCompile Include="..\MyCommander\TextDiff.cpp">
       <ObjectFileName>$(IntDir)MyCommander_TextDiff.obj</ObjectFileName>
     </ClCompile>
@@ -194,11 +239,83 @@
     <ClCompile Include="..\MyCommander\HexDump.cpp">
       <ObjectFileName>$(IntDir)MyCommander_HexDump.obj</ObjectFileName>
     </ClCompile>
+    <ClCompile Include="..\MyCommander\Clipboard.cpp">
+      <ObjectFileName>$(IntDir)MyCommander_Clipboard.obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="..\MyCommander\FileProvider.cpp">
+      <ObjectFileName>$(IntDir)MyCommander_FileProvider.obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="..\MyCommander\LocalProvider.cpp">
+      <ObjectFileName>$(IntDir)MyCommander_LocalProvider.obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="..\MyCommander\MemoryProvider.cpp">
+      <ObjectFileName>$(IntDir)MyCommander_MemoryProvider.obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="..\MyCommander\ProviderCopy.cpp">
+      <ObjectFileName>$(IntDir)MyCommander_ProviderCopy.obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="..\MyCommander\PluginProviderAdapter.cpp">
+      <ObjectFileName>$(IntDir)MyCommander_PluginProviderAdapter.obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="..\MyCommander\UndoJournal.cpp">
+      <ObjectFileName>$(IntDir)MyCommander_UndoJournal.obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="..\MyCommander\RecycleBin.cpp">
+      <ObjectFileName>$(IntDir)MyCommander_RecycleBin.obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="..\MyCommander\SecureDelete.cpp">
+      <ObjectFileName>$(IntDir)MyCommander_SecureDelete.obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="..\MyCommander\ClipboardPaste.cpp">
+      <ObjectFileName>$(IntDir)MyCommander_ClipboardPaste.obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="..\MyCommander\FolderSize.cpp">
+      <ObjectFileName>$(IntDir)MyCommander_FolderSize.obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="..\MyCommander\ListingExport.cpp">
+      <ObjectFileName>$(IntDir)MyCommander_ListingExport.obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="..\MyCommander\HistorySearch.cpp">
+      <ObjectFileName>$(IntDir)MyCommander_HistorySearch.obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="..\MyCommander\Shortcut.cpp">
+      <ObjectFileName>$(IntDir)MyCommander_Shortcut.obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="..\MyCommander\PathCompletion.cpp">
+      <ObjectFileName>$(IntDir)MyCommander_PathCompletion.obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="..\MyCommander\ExplorerReveal.cpp">
+      <ObjectFileName>$(IntDir)MyCommander_ExplorerReveal.obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="..\MyCommander\DiskUsage.cpp">
+      <ObjectFileName>$(IntDir)MyCommander_DiskUsage.obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="..\MyCommander\CheckSum.cpp">
+      <ObjectFileName>$(IntDir)MyCommander_CheckSum.obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="..\MyCommander\NetDrives.cpp">
+      <ObjectFileName>$(IntDir)MyCommander_NetDrives.obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="..\MyCommander\NetShares.cpp">
+      <ObjectFileName>$(IntDir)MyCommander_NetShares.obj</ObjectFileName>
+    </ClCompile>
     <ClCompile Include="..\MyCommander\DirectoryTree.cpp">
       <ObjectFileName>$(IntDir)MyCommander_DirectoryTree.obj</ObjectFileName>
     </ClCompile>
     <ClCompile Include="..\MyCommander\OperationQueue.cpp">
       <ObjectFileName>$(IntDir)MyCommander_OperationQueue.obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="..\NetInfoPlugin\NetInfoModel.cpp">
+      <ObjectFileName>$(IntDir)NetInfo_NetInfoModel.obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="..\NetInfoPlugin\NetInfoScanner.cpp">
+      <ObjectFileName>$(IntDir)NetInfo_NetInfoScanner.obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="..\NetInfoPlugin\NetInfoController.cpp">
+      <ObjectFileName>$(IntDir)NetInfo_NetInfoController.obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="..\NetInfoPlugin\NetInfoSources.cpp">
+      <ObjectFileName>$(IntDir)NetInfo_NetInfoSources.obj</ObjectFileName>
     </ClCompile>
     <ClCompile Include="..\MyCommander\JobWorker.cpp">
       <ObjectFileName>$(IntDir)MyCommander_JobWorker.obj</ObjectFileName>
@@ -213,6 +330,11 @@
     <ClInclude Include="..\MyCommander\ContentSearch.h" />
     <ClInclude Include="..\MyCommander\DirCompare.h" />
     <ClInclude Include="..\MyCommander\DirSync.h" />
+    <ClInclude Include="..\MyCommander\FolderWatch.h" />
+    <ClInclude Include="..\MyCommander\PauseToken.h" />
+    <ClInclude Include="..\MyCommander\RecentLocations.h" />
+    <ClInclude Include="..\MyCommander\EmptyFolders.h" />
+    <ClInclude Include="..\MyCommander\Labels.h" />
     <ClInclude Include="..\MyCommander\TextDiff.h" />
     <ClInclude Include="..\MyCommander\KeyMap.h" />
     <ClInclude Include="..\MyCommander\TextCase.h" />
@@ -227,6 +349,26 @@
     <ClInclude Include="..\MyCommanderPluginSdk\McPluginHost.h" />
     <ClInclude Include="..\MyCommanderPluginSdk\McPluginTypes.h" />
     <ClInclude Include="..\MyCommanderSetup\SetupLogic.h" />
+    <ClInclude Include="..\MyCommander\Clipboard.h" />
+    <ClInclude Include="..\MyCommander\DiskUsage.h" />
+    <ClInclude Include="..\MyCommander\ExplorerReveal.h" />
+    <ClInclude Include="..\MyCommander\PathCompletion.h" />
+    <ClInclude Include="..\MyCommander\Shortcut.h" />
+    <ClInclude Include="..\MyCommander\HistorySearch.h" />
+    <ClInclude Include="..\MyCommander\ListingExport.h" />
+    <ClInclude Include="..\MyCommander\FolderSize.h" />
+    <ClInclude Include="..\MyCommander\ClipboardPaste.h" />
+    <ClInclude Include="..\MyCommander\SecureDelete.h" />
+    <ClInclude Include="..\MyCommander\RecycleBin.h" />
+    <ClInclude Include="..\MyCommander\UndoJournal.h" />
+    <ClInclude Include="..\MyCommander\PluginProviderAdapter.h" />
+    <ClInclude Include="..\MyCommander\ProviderCopy.h" />
+    <ClInclude Include="..\MyCommander\MemoryProvider.h" />
+    <ClInclude Include="..\MyCommander\LocalProvider.h" />
+    <ClInclude Include="..\MyCommander\FileProvider.h" />
+    <ClInclude Include="..\MyCommander\CheckSum.h" />
+    <ClInclude Include="..\MyCommander\NetDrives.h" />
+    <ClInclude Include="..\MyCommander\NetShares.h" />
     <ClInclude Include="TestFixtures.h" />
   </ItemGroup>
   <ItemGroup>

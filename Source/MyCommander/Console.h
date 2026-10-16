@@ -68,13 +68,12 @@ private:
     std::vector<CHAR_INFO> buffer_;
 };
 
-// Drains all pending input, applying any resize seen along the way, and
-// reports whether Esc was among the drained keys. Used to let a long
-// operation (copy/move, and any plugin-driven operation using BeginProgress/
-// UpdateProgress/EndProgress) be cancelled without blocking on
-// ReadConsoleInputW. Shared by main.cpp's own ProgressUi/search cancel
-// polling and PluginManager's PollCancel host function, so both go through
-// the same input-draining logic rather than two independent copies of it.
-bool PollAndConsumeEscape(Console& console);
+// FOP-015: what a progress poll saw. Esc cancels; P or Pause/Break toggles
+// pause. Both can be set when several keys were queued (cancel wins).
+struct ProgressKeys {
+    bool cancel = false;
+    bool togglePause = false;
+};
+ProgressKeys PollProgressKeys(Console& console);
 
 } // namespace mc

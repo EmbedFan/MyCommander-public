@@ -5,10 +5,10 @@
 // "File Info" visible in Explorer's file Properties > Details tab) and the
 // app's own `--version` output both derive from these same macros, so
 // there is nothing else to update.
-#define MC_VERSION_MAJOR 2
+#define MC_VERSION_MAJOR 3
 #define MC_VERSION_MINOR 0
 #define MC_VERSION_PATCH 0
-#define MC_VERSION_BUILD 368
+#define MC_VERSION_BUILD 4
 
 #define MC_STRINGIZE_IMPL(x) #x
 #define MC_STRINGIZE(x) MC_STRINGIZE_IMPL(x)

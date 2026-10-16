@@ -47,12 +47,24 @@ std::wstring FormatKeyChords(const std::vector<KeyChord>& chords);  // "F8, Dele
 enum class CommandId {
     Help, Quit, Rename, GroupRename, DriveLeft, DriveRight, CompareFolders, SyncFolders,
     View, ChooseAction, Edit, Open, Properties,
-    SortName, SortExtension, SortSize, SortTime,
+    SortName, SortExtension, SortSize, SortTime, SortAttributes,
     Copy, CopyAs, QueueCopy, Move, QueueMove, MakeDirectory, NewFile, FindFiles,
     Delete, DeletePermanent, QueueDelete, QueueDeletePermanent,
     Shell, EditSettings, Filter, Attributes, ToggleHidden, Refresh, Tree, SinglePanel, CompareFiles, Hotlist, JobQueue,
     ToggleSelect, SelectMask, DeselectMask, SelectAll, DeselectAll, InvertSelection, SelectUp, SelectDown,
     HistoryBack, HistoryForward, CommandHistoryUp, CommandHistoryDown, InsertName, InsertPath,
+    // MENU-STUBS: FOP-020/SEL-008/UI-017.
+    DiskUsage, CopyNames, ViewFull, ViewBrief,
+    // NAV-016, NAV-017.
+    SwapPanels, RecentFolders, LargestFiles,
+    // SRC-009, LIST-009.
+    FindEmptyFolders, CycleLabel, LabelMenu,
+    // FOP-022, FOP-025.
+    Undo, PasteFromExplorer,
+    // CLI-008.
+    ReverseSearch,
+    // NAV-018.
+    CompletePath,
 };
 
 struct CommandInfo {

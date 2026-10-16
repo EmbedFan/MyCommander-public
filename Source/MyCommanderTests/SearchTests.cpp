@@ -11,6 +11,7 @@ namespace fs = std::filesystem;
 using mc::SearchFiles;
 using mc::SearchOutcome;
 using mc::SearchResult;
+using mc::SearchOptions;
 using mc::WildcardMatch;
 
 namespace {
@@ -223,4 +224,157 @@ TEST_CASE(SearchFiles_Content_ProgressReportsEachFile_SRC004) {
     SearchFiles(root.Path(), ContentOptions(L"*", L"z"), {},
                 [&](size_t, const fs::path& current) { seen.push_back(current.filename().wstring()); });
     CHECK(seen.size() == 2);
+}
+
+// --- SRC-010: largest files -------------------------------------------------------
+
+namespace {
+
+SearchResult Sized(const wchar_t* path, uint64_t size) {
+    SearchResult r{fs::path(path), false, size};
+    return r;
+}
+
+std::vector<std::wstring> Names(const std::vector<SearchResult>& results) {
+    std::vector<std::wstring> out;
+    for (const auto& r : results) out.push_back(r.fullPath.filename().wstring());
+    return out;
+}
+
+}  // namespace
+
+TEST_CASE(OfferTopN_KeepsTheLargestAndDropsTheRest_SRC010) {
+    std::vector<SearchResult> heap;
+    for (uint64_t size : {5, 90, 10, 70, 30, 100, 1}) mc::OfferTopN(heap, Sized(L"C:\\f", size), 3);
+    CHECK(heap.size() == 3);
+    std::vector<uint64_t> kept;
+    for (const auto& r : heap) kept.push_back(r.sizeBytes);
+    std::sort(kept.begin(), kept.end());
+    CHECK((kept == std::vector<uint64_t>{70, 90, 100}));
+}
+
+TEST_CASE(OfferTopN_TiesAtTheCutOffKeepTheLexicallySmallerPath_SRC010) {
+    std::vector<SearchResult> heap;
+    mc::OfferTopN(heap, Sized(L"C:\\b.txt", 50), 1);
+    mc::OfferTopN(heap, Sized(L"C:\\a.txt", 50), 1);  // same size, smaller path: replaces
+    mc::OfferTopN(heap, Sized(L"C:\\c.txt", 50), 1);  // same size, larger path: rejected
+    CHECK(heap.size() == 1);
+    CHECK(heap[0].fullPath == fs::path(L"C:\\a.txt"));
+}
+
+TEST_CASE(OfferTopN_CountLargerThanInputAndCountZero_SRC010) {
+    std::vector<SearchResult> heap;
+    mc::OfferTopN(heap, Sized(L"C:\\x", 1), 10);
+    mc::OfferTopN(heap, Sized(L"C:\\y", 2), 10);
+    CHECK(heap.size() == 2);
+
+    std::vector<SearchResult> none;
+    mc::OfferTopN(none, Sized(L"C:\\z", 3), 0);
+    CHECK(none.empty());
+}
+
+TEST_CASE(SortLargestFirst_OrdersBySizeThenPath_SRC010) {
+    std::vector<SearchResult> results = {Sized(L"C:\\b", 10), Sized(L"C:\\a", 10), Sized(L"C:\\c", 99)};
+    mc::SortLargestFirst(results);
+    CHECK((Names(results) == std::vector<std::wstring>{L"c", L"a", L"b"}));
+}
+
+TEST_CASE(ParseLargestCount_AcceptsOneToTenThousandOnly_SRC010) {
+    size_t n = 0;
+    CHECK(mc::ParseLargestCount(L"1", n) && n == 1);
+    CHECK(mc::ParseLargestCount(L"10000", n) && n == 10000);
+    CHECK(!mc::ParseLargestCount(L"0", n));
+    CHECK(!mc::ParseLargestCount(L"10001", n));
+    CHECK(!mc::ParseLargestCount(L"", n));
+    CHECK(!mc::ParseLargestCount(L"12x", n));
+    CHECK(!mc::ParseLargestCount(L"-5", n));
+}
+
+TEST_CASE(ParseMinimumSize_BlankIsZeroAndDigitsOnly_SRC010) {
+    uint64_t bytes = 99;
+    CHECK(mc::ParseMinimumSize(L"", bytes) && bytes == 0);
+    CHECK(mc::ParseMinimumSize(L"4096", bytes) && bytes == 4096);
+    CHECK(!mc::ParseMinimumSize(L"4k", bytes));
+    CHECK(!mc::ParseMinimumSize(L"1234567890123456789012", bytes));
+}
+
+TEST_CASE(SearchFiles_Largest_RanksRealFilesAndStaysBounded_SRC010) {
+    test::TempDir root;
+    for (int i = 1; i <= 200; ++i) {
+        wchar_t name[32];
+        swprintf_s(name, L"f%03d.bin", i);
+        test::WriteFileContent(root.Path() / name, std::string(static_cast<size_t>(i), 'x'));
+    }
+    SearchOptions options;
+    options.nameMask = L"*";
+    options.largestCount = 10;
+    SearchOutcome out = SearchFiles(root.Path(), options);
+    CHECK(out.results.size() == 10);                      // bounded by N, not by the 200 files
+    CHECK(!out.truncated);                                // ranking mode has no cap to hit
+    CHECK(out.results.front().sizeBytes == 200);
+    CHECK(out.results.back().sizeBytes == 191);
+    CHECK(out.filesSearched == 200);
+}
+
+TEST_CASE(SearchFiles_Largest_MinimumSizeAndSubfoldersAndHidden_SRC010) {
+    test::TempDir root;
+    fs::create_directories(root.Path() / L"sub");
+    test::WriteFileContent(root.Path() / L"small.txt", std::string(10, 'x'));
+    test::WriteFileContent(root.Path() / L"big.txt", std::string(5000, 'x'));
+    test::WriteFileContent(root.Path() / L"sub" / L"nested.txt", std::string(7000, 'x'));
+    fs::path hidden = root.Path() / L"hidden.txt";
+    test::WriteFileContent(hidden, std::string(9000, 'x'));
+    SetFileAttributesW(hidden.c_str(), FILE_ATTRIBUTE_HIDDEN);
+
+    SearchOptions base;
+    base.nameMask = L"*";
+    base.largestCount = 100;
+
+    SearchOptions minimum = base;
+    minimum.minSize = 1000;
+    minimum.includeHidden = true;
+    SearchOutcome withHidden = SearchFiles(root.Path(), minimum);
+    CHECK((Names(withHidden.results) == std::vector<std::wstring>{L"hidden.txt", L"nested.txt", L"big.txt"}));
+
+    SearchOptions noHidden = minimum;
+    noHidden.includeHidden = false;
+    SearchOutcome visible = SearchFiles(root.Path(), noHidden);
+    CHECK((Names(visible.results) == std::vector<std::wstring>{L"nested.txt", L"big.txt"}));
+
+    SearchOptions flat = minimum;
+    flat.recursive = false;
+    SearchOutcome top = SearchFiles(root.Path(), flat);
+    CHECK((Names(top.results) == std::vector<std::wstring>{L"hidden.txt", L"big.txt"}));
+}
+
+TEST_CASE(SearchFiles_Largest_JunctionIsNotEnteredOrRanked_SRC010) {
+    test::TempDir root;
+    test::TempDir elsewhere;
+    test::WriteFileContent(elsewhere.Path() / L"behind.bin", std::string(50000, 'x'));
+    test::WriteFileContent(root.Path() / L"own.bin", std::string(100, 'x'));
+    if (!test::CreateJunction(root.Path() / L"link", elsewhere.Path())) {
+        std::printf("note: junction creation unavailable here; skipping the junction check\n");
+        return;
+    }
+    SearchOptions options;
+    options.nameMask = L"*";
+    options.largestCount = 10;
+    SearchOutcome out = SearchFiles(root.Path(), options);
+    CHECK((Names(out.results) == std::vector<std::wstring>{L"own.bin"}));  // behind.bin is not reached
+}
+
+TEST_CASE(SearchFiles_Largest_CancelReturnsThePartialTopN_SRC010) {
+    test::TempDir root;
+    for (int i = 1; i <= 50; ++i) {
+        wchar_t name[32];
+        swprintf_s(name, L"c%02d.bin", i);
+        test::WriteFileContent(root.Path() / name, std::string(static_cast<size_t>(i), 'x'));
+    }
+    SearchOptions options;
+    options.nameMask = L"*";
+    options.largestCount = 5;
+    int polls = 0;
+    SearchOutcome out = SearchFiles(root.Path(), options, [&] { return ++polls > 10; });
+    CHECK(out.cancelled);
+    CHECK(out.results.size() <= 5);
 }
